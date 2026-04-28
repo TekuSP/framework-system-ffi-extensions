@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: true
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev
+
+      - name: Setup Rust toolchain
+        run: rustup show
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Check generated bindings are up to date
+        run: git diff --exit-code -- csharp/NativeMethods.g.cs
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: framework_dotnet_ffi_linux
+          path: |
+            target/release/libframework_dotnet_ffi.so
+            csharp/NativeMethods.g.cs
+
+  build-windows:
+    name: Build Windows
+    runs-on: windows-2022
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: true
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Setup Rust toolchain
+        run: rustup show
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Check generated bindings are up to date
+        run: git diff --exit-code -- csharp/NativeMethods.g.cs
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: framework_dotnet_ffi_windows
+          path: |
+            target/release/framework_dotnet_ffi.dll
+            target/release/framework_dotnet_ffi.dll.lib
+            target/release/framework_dotnet_ffi.pdb
+            csharp/NativeMethods.g.cs
+
+  lints:
+    name: Lints
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: true
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev
+
+      - name: Setup Rust toolchain
+        run: rustup show
+
+      - name: Run cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: Run cargo clippy
+        run: cargo clippy -- -D warnings
