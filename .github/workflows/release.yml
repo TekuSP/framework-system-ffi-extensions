@@ -57,7 +57,7 @@ jobs:
           zip -r ../framework_dotnet_ffi_linux_x86_64.zip .
 
       - name: Upload Linux package artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: framework_dotnet_ffi_linux_release
           path: dist/framework_dotnet_ffi_linux_x86_64.zip
@@ -91,7 +91,7 @@ jobs:
           Compress-Archive -Path dist\windows\* -DestinationPath dist\framework_dotnet_ffi_windows_x86_64.zip -Force
 
       - name: Upload Windows package artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: framework_dotnet_ffi_windows_release
           path: dist/framework_dotnet_ffi_windows_x86_64.zip

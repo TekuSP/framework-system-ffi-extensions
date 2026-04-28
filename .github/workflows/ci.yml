@@ -30,7 +30,7 @@ jobs:
         run: git diff --exit-code -- csharp/NativeMethods.g.cs
 
       - name: Upload Linux artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: framework_dotnet_ffi_linux
           path: |
@@ -57,7 +57,7 @@ jobs:
         run: git diff --exit-code -- csharp/NativeMethods.g.cs
 
       - name: Upload Windows artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: framework_dotnet_ffi_windows
           path: |
