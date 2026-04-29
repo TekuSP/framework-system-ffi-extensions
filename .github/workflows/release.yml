@@ -127,6 +127,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p release-assets
+          cmp dist/framework_lib_ffi_linux_x86_64_release/NativeMethods.g.cs dist/framework_lib_ffi_linux_arm64_release/NativeMethods.g.cs
+          cmp dist/framework_lib_ffi_linux_x86_64_release/NativeMethods.g.cs dist/framework_lib_ffi_windows_x86_64_release/NativeMethods.g.cs
+          cmp dist/framework_lib_ffi_linux_x86_64_release/NativeMethods.g.cs dist/framework_lib_ffi_windows_arm64_release/NativeMethods.g.cs
           mv dist/framework_lib_ffi_linux_x86_64_release/libframework_lib_ffi.so release-assets/framework_lib_ffi_linux_x86_64.so
           mv dist/framework_lib_ffi_linux_arm64_release/libframework_lib_ffi.so release-assets/framework_lib_ffi_linux_arm64.so
           mv dist/framework_lib_ffi_windows_x86_64_release/framework_lib_ffi.dll release-assets/framework_lib_ffi_windows_x86_64.dll
@@ -143,4 +146,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mapfile -d '' files < <(find release-assets -type f -print0)
-          gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
+          gh release upload "$RELEASE_TAG" "${files[@]}" --clobber --repo "${{ github.repository }}"
