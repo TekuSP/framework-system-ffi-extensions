@@ -70,6 +70,7 @@ jobs:
     env:
       RELEASE_TAG: ${{ needs.prepare-release.outputs.tag_name }}
       RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
+      FRAMEWORK_LIB_FFI_RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
 
     steps:
       - uses: actions/checkout@v6
@@ -97,8 +98,6 @@ jobs:
           echo "Passing FRAMEWORK_LIB_FFI_RELEASE_VERSION=${RELEASE_VERSION} to cargo build"
 
       - name: Build release
-        env:
-          FRAMEWORK_LIB_FFI_RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
         run: cargo build --release
 
       - name: Check generated bindings are up to date
@@ -129,13 +128,14 @@ jobs:
         shell: bash
         run: |
           mkdir -p release-assets
+          primary_artifact_dir="dist/framework_lib_ffi_linux_x86_64_release"
           move_asset() {
             local source_path="$1"
             local asset_name="$2"
             [[ -f "$source_path" ]] || { echo "Error: Missing expected asset $source_path"; exit 1; }
             mv "$source_path" "release-assets/$asset_name" || { echo "Error: Failed to move $source_path to release-assets/$asset_name"; exit 1; }
           }
-          binding_ref="dist/framework_lib_ffi_linux_x86_64_release/csharp/NativeMethods.g.cs"
+          binding_ref="$primary_artifact_dir/csharp/NativeMethods.g.cs"
           [[ -f "$binding_ref" ]] || { echo "Error: NativeMethods.g.cs missing from linux-x86_64 artifact"; exit 1; }
           for binding_source in \
             "dist/framework_lib_ffi_linux_arm64_release/csharp/NativeMethods.g.cs:linux-arm64" \
