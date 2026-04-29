@@ -98,10 +98,15 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          if [[ -f LICENSE.txt ]]; then
+            license_file="LICENSE.txt"
+          else
+            license_file="LICENSE.md"
+          fi
           mkdir -p "dist/${{ matrix.packageDir }}"
           cp target/release/libframework_lib_ffi.so "dist/${{ matrix.packageDir }}/"
           cp csharp/NativeMethods.g.cs "dist/${{ matrix.packageDir }}/"
-          cp LICENSE.txt "dist/${{ matrix.packageDir }}/"
+          cp "$license_file" "dist/${{ matrix.packageDir }}/"
           cd "dist/${{ matrix.packageDir }}"
           zip -r "../${{ matrix.archiveName }}" .
 
@@ -109,12 +114,17 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          if (Test-Path LICENSE.txt) {
+            $licenseFile = 'LICENSE.txt'
+          } else {
+            $licenseFile = 'LICENSE.md'
+          }
           New-Item -ItemType Directory -Force dist\${{ matrix.packageDir }} | Out-Null
           Copy-Item target\release\framework_lib_ffi.dll dist\${{ matrix.packageDir }}\
           Copy-Item target\release\framework_lib_ffi.dll.lib dist\${{ matrix.packageDir }}\
           Copy-Item target\release\framework_lib_ffi.pdb dist\${{ matrix.packageDir }}\
           Copy-Item csharp\NativeMethods.g.cs dist\${{ matrix.packageDir }}\
-          Copy-Item LICENSE.txt dist\${{ matrix.packageDir }}\
+          Copy-Item $licenseFile dist\${{ matrix.packageDir }}\
           Compress-Archive -Path dist\${{ matrix.packageDir }}\* -DestinationPath dist\${{ matrix.archiveName }} -Force
 
       - name: Upload packaged artifact
