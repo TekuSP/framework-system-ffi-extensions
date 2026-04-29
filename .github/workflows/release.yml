@@ -212,4 +212,6 @@ jobs:
       - name: Delete intermediate build artifacts
         uses: geekyeggo/delete-artifact@v6
         with:
+          # Matches the four matrix-produced intermediate artifacts:
+          # framework_lib_ffi_{linux_x86_64,linux_arm64,windows_x86_64,windows_arm64}_build
           name: framework_lib_ffi_*_build
