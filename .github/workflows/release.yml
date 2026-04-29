@@ -1,33 +1,69 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
-  workflow_dispatch:
-    inputs:
-      tag_name:
-        description: "Tag name to release (for example v0.6.2)"
-        required: true
-      release_name:
-        description: "Optional release title"
-        required: false
-      draft:
-        description: "Create as draft release"
-        required: false
-        type: boolean
-        default: false
+  release:
+    types: [published]
 
 permissions:
+  actions: write
   contents: write
 
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: true
 
 jobs:
-  build-linux:
-    name: Package Linux
+  prepare-release:
+    name: Prepare release metadata
     runs-on: ubuntu-24.04
+    outputs:
+      tag_name: ${{ steps.metadata.outputs.tag_name }}
+      version: ${{ steps.metadata.outputs.version }}
+    steps:
+      - id: metadata
+        shell: bash
+        run: |
+          tag_name="${{ github.event.release.tag_name }}"
+          version="${tag_name#v}"
+          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build-native:
+    name: Package native library (${{ matrix.os }} ${{ matrix.platform }})
+    needs: prepare-release
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: Linux
+            runsOn: ubuntu-24.04
+            platform: linux-x86_64
+            artifactName: framework_lib_ffi_linux_x86_64_release
+            archiveName: framework_lib_ffi_linux_x86_64.zip
+            packageDir: linux-x86_64
+          - os: Linux
+            runsOn: ubuntu-24.04-arm
+            platform: linux-arm64
+            artifactName: framework_lib_ffi_linux_arm64_release
+            archiveName: framework_lib_ffi_linux_arm64.zip
+            packageDir: linux-arm64
+          - os: Windows
+            runsOn: windows-2022
+            platform: windows-x86_64
+            artifactName: framework_lib_ffi_windows_x86_64_release
+            archiveName: framework_lib_ffi_windows_x86_64.zip
+            packageDir: windows-x86_64
+          - os: Windows
+            runsOn: windows-11-arm
+            platform: windows-arm64
+            artifactName: framework_lib_ffi_windows_arm64_release
+            archiveName: framework_lib_ffi_windows_arm64.zip
+            packageDir: windows-arm64
+
+    runs-on: ${{ matrix.runsOn }}
+    env:
+      RELEASE_TAG: ${{ needs.prepare-release.outputs.tag_name }}
+      RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
+
     steps:
       - uses: actions/checkout@v6
         with:
@@ -38,13 +74,19 @@ jobs:
         with:
           cache-workspaces: |
             framework-system -> target
-  
+
       - name: Install with Cache Linux Framework dependencies (libudev-dev)
         uses: awalsh128/cache-apt-pkgs-action@v1
         if: runner.os == 'Linux'
         with:
           packages: libudev-dev
           version: ${{ runner.os }}-${{ runner.arch }}
+
+      - name: Log release metadata
+        shell: bash
+        run: |
+          echo "Publishing tag ${RELEASE_TAG}"
+          echo "Resolved version ${RELEASE_VERSION}"
 
       - name: Build release
         run: cargo build --release
@@ -53,80 +95,53 @@ jobs:
         run: git diff --exit-code -- csharp/NativeMethods.g.cs
 
       - name: Create Linux package
-        run: |
-          mkdir -p dist/linux
-          cp target/release/libframework_lib_ffi.so dist/linux/
-          cp csharp/NativeMethods.g.cs dist/linux/
-          cp LICENSE.md dist/linux/
-          cd dist/linux
-          zip -r ../framework_lib_ffi_linux_x86_64.zip .
-
-      - name: Upload Linux package artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: framework_lib_ffi_linux_release
-          path: dist/framework_lib_ffi_linux_x86_64.zip
-
-  build-windows:
-    name: Package Windows
-    runs-on: windows-2022
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          submodules: recursive
-
-      - name: Setup Rust with Cache
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache-workspaces: |
-            framework-system -> target
-  
-      - name: Install with Cache Linux Framework dependencies (libudev-dev)
-        uses: awalsh128/cache-apt-pkgs-action@v1
         if: runner.os == 'Linux'
-        with:
-          packages: libudev-dev
-          version: ${{ runner.os }}-${{ runner.arch }}
-
-      - name: Check generated bindings are up to date
-        run: git diff --exit-code -- csharp/NativeMethods.g.cs
+        shell: bash
+        run: |
+          mkdir -p "dist/${{ matrix.packageDir }}"
+          cp target/release/libframework_lib_ffi.so "dist/${{ matrix.packageDir }}/"
+          cp csharp/NativeMethods.g.cs "dist/${{ matrix.packageDir }}/"
+          cp LICENSE.txt "dist/${{ matrix.packageDir }}/"
+          cd "dist/${{ matrix.packageDir }}"
+          zip -r "../${{ matrix.archiveName }}" .
 
       - name: Create Windows package
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist\windows | Out-Null
-          Copy-Item target\release\framework_lib_ffi.dll dist\windows\
-          Copy-Item target\release\framework_lib_ffi.dll.lib dist\windows\
-          Copy-Item target\release\framework_lib_ffi.pdb dist\windows\
-          Copy-Item csharp\NativeMethods.g.cs dist\windows\
-          Copy-Item LICENSE.md dist\windows\
-          Compress-Archive -Path dist\windows\* -DestinationPath dist\framework_lib_ffi_windows_x86_64.zip -Force
+          New-Item -ItemType Directory -Force dist\${{ matrix.packageDir }} | Out-Null
+          Copy-Item target\release\framework_lib_ffi.dll dist\${{ matrix.packageDir }}\
+          Copy-Item target\release\framework_lib_ffi.dll.lib dist\${{ matrix.packageDir }}\
+          Copy-Item target\release\framework_lib_ffi.pdb dist\${{ matrix.packageDir }}\
+          Copy-Item csharp\NativeMethods.g.cs dist\${{ matrix.packageDir }}\
+          Copy-Item LICENSE.txt dist\${{ matrix.packageDir }}\
+          Compress-Archive -Path dist\${{ matrix.packageDir }}\* -DestinationPath dist\${{ matrix.archiveName }} -Force
 
-      - name: Upload Windows package artifact
+      - name: Upload packaged artifact
         uses: actions/upload-artifact@v7
         with:
-          name: framework_lib_ffi_windows_release
-          path: dist/framework_lib_ffi_windows_x86_64.zip
+          name: ${{ matrix.artifactName }}
+          path: dist/${{ matrix.archiveName }}
+          if-no-files-found: error
 
   publish:
-    name: Publish Release
-    runs-on: ubuntu-24.04
+    name: Publish release assets
     needs:
-      - build-linux
-      - build-windows
+      - prepare-release
+      - build-native
+    runs-on: ubuntu-24.04
     steps:
       - name: Download packaged artifacts
         uses: actions/download-artifact@v8
         with:
           path: dist
 
-      - name: Publish GitHub release
+      - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
-          name: ${{ github.event_name == 'workflow_dispatch' && (inputs.release_name || inputs.tag_name) || github.ref_name }}
-          draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || false }}
-          generate_release_notes: true
+          tag_name: ${{ needs.prepare-release.outputs.tag_name }}
           files: |
-            dist/framework_lib_ffi_linux_release/framework_lib_ffi_linux_x86_64.zip
-            dist/framework_lib_ffi_windows_release/framework_lib_ffi_windows_x86_64.zip
+            dist/framework_lib_ffi_linux_x86_64_release/framework_lib_ffi_linux_x86_64.zip
+            dist/framework_lib_ffi_linux_arm64_release/framework_lib_ffi_linux_arm64.zip
+            dist/framework_lib_ffi_windows_x86_64_release/framework_lib_ffi_windows_x86_64.zip
+            dist/framework_lib_ffi_windows_arm64_release/framework_lib_ffi_windows_arm64.zip
