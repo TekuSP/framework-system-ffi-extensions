@@ -127,10 +127,13 @@ jobs:
         shell: bash
         run: |
           mkdir -p release-assets
-          binding_ref="dist/framework_lib_ffi_linux_x86_64_release/NativeMethods.g.cs"
-          cmp "$binding_ref" dist/framework_lib_ffi_linux_arm64_release/NativeMethods.g.cs || (echo "Error: NativeMethods.g.cs differs between linux-x86_64 and linux-arm64 builds" && exit 1)
-          cmp "$binding_ref" dist/framework_lib_ffi_windows_x86_64_release/NativeMethods.g.cs || (echo "Error: NativeMethods.g.cs differs between linux-x86_64 and windows-x86_64 builds" && exit 1)
-          cmp "$binding_ref" dist/framework_lib_ffi_windows_arm64_release/NativeMethods.g.cs || (echo "Error: NativeMethods.g.cs differs between linux-x86_64 and windows-arm64 builds" && exit 1)
+          binding_ref="$(find dist/framework_lib_ffi_linux_x86_64_release -name NativeMethods.g.cs -print -quit)"
+          linux_arm64_binding="$(find dist/framework_lib_ffi_linux_arm64_release -name NativeMethods.g.cs -print -quit)"
+          windows_x86_64_binding="$(find dist/framework_lib_ffi_windows_x86_64_release -name NativeMethods.g.cs -print -quit)"
+          windows_arm64_binding="$(find dist/framework_lib_ffi_windows_arm64_release -name NativeMethods.g.cs -print -quit)"
+          cmp "$binding_ref" "$linux_arm64_binding" || (echo "Error: NativeMethods.g.cs differs between linux-x86_64 and linux-arm64 outputs" && exit 1)
+          cmp "$binding_ref" "$windows_x86_64_binding" || (echo "Error: NativeMethods.g.cs differs between linux-x86_64 and windows-x86_64 outputs" && exit 1)
+          cmp "$binding_ref" "$windows_arm64_binding" || (echo "Error: NativeMethods.g.cs differs between linux-x86_64 and windows-arm64 outputs" && exit 1)
           mv dist/framework_lib_ffi_linux_x86_64_release/libframework_lib_ffi.so release-assets/framework_lib_ffi_linux_x86_64.so
           mv dist/framework_lib_ffi_linux_arm64_release/libframework_lib_ffi.so release-assets/framework_lib_ffi_linux_arm64.so
           mv dist/framework_lib_ffi_windows_x86_64_release/framework_lib_ffi.dll release-assets/framework_lib_ffi_windows_x86_64.dll
