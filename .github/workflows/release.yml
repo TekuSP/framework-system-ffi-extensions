@@ -127,9 +127,10 @@ jobs:
         shell: bash
         run: |
           mkdir -p release-assets
-          cmp dist/framework_lib_ffi_linux_x86_64_release/NativeMethods.g.cs dist/framework_lib_ffi_linux_arm64_release/NativeMethods.g.cs
-          cmp dist/framework_lib_ffi_linux_x86_64_release/NativeMethods.g.cs dist/framework_lib_ffi_windows_x86_64_release/NativeMethods.g.cs
-          cmp dist/framework_lib_ffi_linux_x86_64_release/NativeMethods.g.cs dist/framework_lib_ffi_windows_arm64_release/NativeMethods.g.cs
+          binding_ref="dist/framework_lib_ffi_linux_x86_64_release/NativeMethods.g.cs"
+          cmp "$binding_ref" dist/framework_lib_ffi_linux_arm64_release/NativeMethods.g.cs || (echo "Error: NativeMethods.g.cs differs between linux-x86_64 and linux-arm64 builds" && exit 1)
+          cmp "$binding_ref" dist/framework_lib_ffi_windows_x86_64_release/NativeMethods.g.cs || (echo "Error: NativeMethods.g.cs differs between linux-x86_64 and windows-x86_64 builds" && exit 1)
+          cmp "$binding_ref" dist/framework_lib_ffi_windows_arm64_release/NativeMethods.g.cs || (echo "Error: NativeMethods.g.cs differs between linux-x86_64 and windows-arm64 builds" && exit 1)
           mv dist/framework_lib_ffi_linux_x86_64_release/libframework_lib_ffi.so release-assets/framework_lib_ffi_linux_x86_64.so
           mv dist/framework_lib_ffi_linux_arm64_release/libframework_lib_ffi.so release-assets/framework_lib_ffi_linux_arm64.so
           mv dist/framework_lib_ffi_windows_x86_64_release/framework_lib_ffi.dll release-assets/framework_lib_ffi_windows_x86_64.dll
@@ -138,7 +139,7 @@ jobs:
           mv dist/framework_lib_ffi_windows_arm64_release/framework_lib_ffi.dll release-assets/framework_lib_ffi_windows_arm64.dll
           mv dist/framework_lib_ffi_windows_arm64_release/framework_lib_ffi.dll.lib release-assets/framework_lib_ffi_windows_arm64.dll.lib
           mv dist/framework_lib_ffi_windows_arm64_release/framework_lib_ffi.pdb release-assets/framework_lib_ffi_windows_arm64.pdb
-          mv dist/framework_lib_ffi_linux_x86_64_release/NativeMethods.g.cs release-assets/NativeMethods.g.cs
+          mv "$binding_ref" release-assets/NativeMethods.g.cs
 
       - name: Upload assets to published release
         shell: bash
