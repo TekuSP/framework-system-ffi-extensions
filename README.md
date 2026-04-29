@@ -1,5 +1,6 @@
 # framework_lib_ffi
 [![CI](https://github.com/TekuSP/framework-system-ffi-extensions/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/TekuSP/framework-system-ffi-extensions/actions/workflows/ci.yml)
+
 Standalone native FFI facade for `framework-system`, intended for .NET interop via
 `csbindgen`.
 
