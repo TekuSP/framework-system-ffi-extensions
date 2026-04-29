@@ -32,9 +32,9 @@ jobs:
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v7
         with:
-          name: framework_dotnet_ffi_linux
+          name: framework_lib_ffi_linux
           path: |
-            target/release/libframework_dotnet_ffi.so
+            target/release/libframework_lib_ffi.so
             csharp/NativeMethods.g.cs
 
   build-windows:
@@ -59,11 +59,11 @@ jobs:
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v7
         with:
-          name: framework_dotnet_ffi_windows
+          name: framework_lib_ffi_windows
           path: |
-            target/release/framework_dotnet_ffi.dll
-            target/release/framework_dotnet_ffi.dll.lib
-            target/release/framework_dotnet_ffi.pdb
+            target/release/framework_lib_ffi.dll
+            target/release/framework_lib_ffi.dll.lib
+            target/release/framework_lib_ffi.pdb
             csharp/NativeMethods.g.cs
 
   lints:

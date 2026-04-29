@@ -1,5 +1,5 @@
 [package]
-name = "framework_dotnet_ffi"
+name = "framework_lib_ffi"
 version = "0.6.2"
 description = "Standalone native FFI surface for Framework System .NET interop"
 license = "BSD-3-Clause"

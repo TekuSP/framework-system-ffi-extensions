@@ -369,7 +369,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "framework_dotnet_ffi"
+name = "framework_lib_ffi"
 version = "0.6.2"
 dependencies = [
  "csbindgen",
