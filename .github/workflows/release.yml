@@ -119,6 +119,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Download build artifacts
         uses: actions/download-artifact@v8
