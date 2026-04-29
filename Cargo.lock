@@ -369,14 +369,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "framework_lib_ffi"
-version = "0.6.2"
-dependencies = [
- "csbindgen",
- "framework_lib",
-]
-
-[[package]]
 name = "framework_lib"
 version = "0.6.2"
 dependencies = [
@@ -410,6 +402,14 @@ dependencies = [
  "winreg",
  "wmi",
  "zerocopy",
+]
+
+[[package]]
+name = "framework_lib_ffi"
+version = "0.6.2"
+dependencies = [
+ "csbindgen",
+ "framework_lib",
 ]
 
 [[package]]
