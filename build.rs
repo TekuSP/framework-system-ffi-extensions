@@ -9,7 +9,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     csbindgen::Builder::default()
         .input_extern_file("src/lib.rs")
-        .csharp_dll_name("framework_dotnet_ffi")
+        .csharp_dll_name("framework_lib_ffi")
         .csharp_namespace("Framework.System.Interop")
         .csharp_class_name("NativeMethods")
         .csharp_class_accessibility("internal")

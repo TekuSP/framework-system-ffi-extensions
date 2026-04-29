@@ -1,4 +1,4 @@
-# framework_dotnet_ffi
+# framework_lib_ffi
 
 Standalone native FFI facade for `framework-system`, intended for .NET interop via
 `csbindgen`.

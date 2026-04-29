@@ -1,45 +1,102 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
-  workflow_dispatch:
-    inputs:
-      tag_name:
-        description: "Tag name to release (for example v0.6.2)"
-        required: true
-      release_name:
-        description: "Optional release title"
-        required: false
-      draft:
-        description: "Create as draft release"
-        required: false
-        type: boolean
-        default: false
+  release:
+    types: [published]
 
 permissions:
-  contents: write
+  actions: write
+  contents: read
 
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: true
 
 jobs:
-  build-linux:
-    name: Package Linux
+  prepare-release:
+    name: Prepare release metadata
     runs-on: ubuntu-24.04
+    outputs:
+      tag_name: ${{ steps.metadata.outputs.tag_name }}
+      version: ${{ steps.metadata.outputs.version }}
+    steps:
+      - id: metadata
+        shell: bash
+        run: |
+          tag_name="${{ github.event.release.tag_name }}"
+          version="${tag_name#v}"
+          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build-native:
+    name: Build native library (${{ matrix.os }} ${{ matrix.platform }})
+    needs: prepare-release
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: Linux
+            runsOn: ubuntu-24.04
+            platform: linux-x86_64
+            artifactName: framework_lib_ffi_linux_x86_64_build
+            artifactPath: |
+              target/release/libframework_lib_ffi.so
+              csharp/NativeMethods.g.cs
+          - os: Linux
+            runsOn: ubuntu-24.04-arm
+            platform: linux-arm64
+            artifactName: framework_lib_ffi_linux_arm64_build
+            artifactPath: |
+              target/release/libframework_lib_ffi.so
+              csharp/NativeMethods.g.cs
+          - os: Windows
+            runsOn: windows-2022
+            platform: windows-x86_64
+            artifactName: framework_lib_ffi_windows_x86_64_build
+            artifactPath: |
+              target/release/framework_lib_ffi.dll
+              target/release/framework_lib_ffi.dll.lib
+              target/release/framework_lib_ffi.pdb
+              csharp/NativeMethods.g.cs
+          - os: Windows
+            runsOn: windows-11-arm
+            platform: windows-arm64
+            artifactName: framework_lib_ffi_windows_arm64_build
+            artifactPath: |
+              target/release/framework_lib_ffi.dll
+              target/release/framework_lib_ffi.dll.lib
+              target/release/framework_lib_ffi.pdb
+              csharp/NativeMethods.g.cs
+
+    runs-on: ${{ matrix.runsOn }}
+    env:
+      RELEASE_TAG: ${{ needs.prepare-release.outputs.tag_name }}
+      RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
+      FRAMEWORK_LIB_FFI_RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
+
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libudev-dev zip
+      - name: Setup Rust with Cache
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-workspaces: |
+            framework-system -> target
 
-      - name: Setup Rust toolchain
-        run: rustup show
+      - name: Install with Cache Linux Framework dependencies (libudev-dev)
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        if: runner.os == 'Linux'
+        with:
+          packages: libudev-dev
+          version: ${{ runner.os }}-${{ runner.arch }}
+
+      - name: Log release metadata
+        shell: bash
+        run: |
+          echo "Publishing tag ${RELEASE_TAG}"
+          echo "Resolved version ${RELEASE_VERSION}"
+          echo "Passing FRAMEWORK_LIB_FFI_RELEASE_VERSION=${RELEASE_VERSION} to cargo build"
 
       - name: Build release
         run: cargo build --release
@@ -47,74 +104,116 @@ jobs:
       - name: Check generated bindings are up to date
         run: git diff --exit-code -- csharp/NativeMethods.g.cs
 
-      - name: Create Linux package
-        run: |
-          mkdir -p dist/linux
-          cp target/release/libframework_dotnet_ffi.so dist/linux/
-          cp csharp/NativeMethods.g.cs dist/linux/
-          cp LICENSE.md dist/linux/
-          cd dist/linux
-          zip -r ../framework_dotnet_ffi_linux_x86_64.zip .
-
-      - name: Upload Linux package artifact
+      - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
-          name: framework_dotnet_ffi_linux_release
-          path: dist/framework_dotnet_ffi_linux_x86_64.zip
+          name: ${{ matrix.artifactName }}
+          path: ${{ matrix.artifactPath }}
+          if-no-files-found: error
 
-  build-windows:
-    name: Package Windows
-    runs-on: windows-2022
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          submodules: recursive
-
-      - name: Setup Rust toolchain
-        run: rustup show
-
-      - name: Build release
-        run: cargo build --release
-
-      - name: Check generated bindings are up to date
-        run: git diff --exit-code -- csharp/NativeMethods.g.cs
-
-      - name: Create Windows package
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force dist\windows | Out-Null
-          Copy-Item target\release\framework_dotnet_ffi.dll dist\windows\
-          Copy-Item target\release\framework_dotnet_ffi.dll.lib dist\windows\
-          Copy-Item target\release\framework_dotnet_ffi.pdb dist\windows\
-          Copy-Item csharp\NativeMethods.g.cs dist\windows\
-          Copy-Item LICENSE.md dist\windows\
-          Compress-Archive -Path dist\windows\* -DestinationPath dist\framework_dotnet_ffi_windows_x86_64.zip -Force
-
-      - name: Upload Windows package artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: framework_dotnet_ffi_windows_release
-          path: dist/framework_dotnet_ffi_windows_x86_64.zip
-
-  publish:
-    name: Publish Release
-    runs-on: ubuntu-24.04
+  package-artifacts:
+    name: Upload packaged artifacts
     needs:
-      - build-linux
-      - build-windows
+      - prepare-release
+      - build-native
+    runs-on: ubuntu-24.04
     steps:
-      - name: Download packaged artifacts
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Download build artifacts
         uses: actions/download-artifact@v8
         with:
           path: dist
 
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v3
+      - name: Prepare packaged artifacts
+        shell: bash
+        run: |
+          mkdir -p packaged-artifacts
+          primary_artifact_dir="dist/framework_lib_ffi_linux_x86_64_build"
+          copy_into_package() {
+            local source_path="$1"
+            local package_dir="$2"
+            [[ -f "$source_path" ]] || { echo "Error: Missing expected asset $source_path"; exit 1; }
+            cp "$source_path" "$package_dir/" || { echo "Error: Failed to copy $source_path into $package_dir"; exit 1; }
+          }
+          prepare_package() {
+            local artifact_dir="$1"
+            local package_name="$2"
+            shift 2
+            local package_dir="packaged-artifacts/$package_name"
+            mkdir -p "$package_dir"
+            cp -R "$artifact_dir/csharp" "$package_dir/" || { echo "Error: Failed to copy C# bindings from $artifact_dir"; exit 1; }
+            cp LICENSE.txt README.md "$package_dir/" || { echo "Error: Failed to copy repository docs into $package_dir"; exit 1; }
+            for source_path in "$@"; do
+              copy_into_package "$source_path" "$package_dir"
+            done
+          }
+          binding_ref="$primary_artifact_dir/csharp/NativeMethods.g.cs"
+          [[ -f "$binding_ref" ]] || { echo "Error: NativeMethods.g.cs missing from linux-x86_64 artifact"; exit 1; }
+          for binding_source in \
+            "dist/framework_lib_ffi_linux_arm64_build/csharp/NativeMethods.g.cs:linux-arm64" \
+            "dist/framework_lib_ffi_windows_x86_64_build/csharp/NativeMethods.g.cs:windows-x86_64" \
+            "dist/framework_lib_ffi_windows_arm64_build/csharp/NativeMethods.g.cs:windows-arm64"
+          do
+            binding_path="${binding_source%%:*}"
+            platform="${binding_source##*:}"
+            [[ -f "$binding_path" ]] || { echo "Error: NativeMethods.g.cs missing from ${platform} artifact"; exit 1; }
+            cmp "$binding_ref" "$binding_path" || { echo "Error: NativeMethods.g.cs differs between linux-x86_64 and ${platform} outputs"; exit 1; }
+          done
+          prepare_package \
+            dist/framework_lib_ffi_linux_x86_64_build \
+            framework_lib_ffi_linux_x86_64_release \
+            dist/framework_lib_ffi_linux_x86_64_build/target/release/libframework_lib_ffi.so
+          prepare_package \
+            dist/framework_lib_ffi_linux_arm64_build \
+            framework_lib_ffi_linux_arm64_release \
+            dist/framework_lib_ffi_linux_arm64_build/target/release/libframework_lib_ffi.so
+          prepare_package \
+            dist/framework_lib_ffi_windows_x86_64_build \
+            framework_lib_ffi_windows_x86_64_release \
+            dist/framework_lib_ffi_windows_x86_64_build/target/release/framework_lib_ffi.dll \
+            dist/framework_lib_ffi_windows_x86_64_build/target/release/framework_lib_ffi.dll.lib \
+            dist/framework_lib_ffi_windows_x86_64_build/target/release/framework_lib_ffi.pdb
+          prepare_package \
+            dist/framework_lib_ffi_windows_arm64_build \
+            framework_lib_ffi_windows_arm64_release \
+            dist/framework_lib_ffi_windows_arm64_build/target/release/framework_lib_ffi.dll \
+            dist/framework_lib_ffi_windows_arm64_build/target/release/framework_lib_ffi.dll.lib \
+            dist/framework_lib_ffi_windows_arm64_build/target/release/framework_lib_ffi.pdb
+
+      - name: Upload linux x86_64 artifact
+        uses: actions/upload-artifact@v7
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
-          name: ${{ github.event_name == 'workflow_dispatch' && (inputs.release_name || inputs.tag_name) || github.ref_name }}
-          draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || false }}
-          generate_release_notes: true
-          files: |
-            dist/framework_dotnet_ffi_linux_release/framework_dotnet_ffi_linux_x86_64.zip
-            dist/framework_dotnet_ffi_windows_release/framework_dotnet_ffi_windows_x86_64.zip
+          name: framework_lib_ffi_linux_x86_64_release
+          path: packaged-artifacts/framework_lib_ffi_linux_x86_64_release
+          if-no-files-found: error
+
+      - name: Upload linux arm64 artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: framework_lib_ffi_linux_arm64_release
+          path: packaged-artifacts/framework_lib_ffi_linux_arm64_release
+          if-no-files-found: error
+
+      - name: Upload windows x86_64 artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: framework_lib_ffi_windows_x86_64_release
+          path: packaged-artifacts/framework_lib_ffi_windows_x86_64_release
+          if-no-files-found: error
+
+      - name: Upload windows arm64 artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: framework_lib_ffi_windows_arm64_release
+          path: packaged-artifacts/framework_lib_ffi_windows_arm64_release
+          if-no-files-found: error
+
+      - name: Delete intermediate build artifacts
+        uses: geekyeggo/delete-artifact@v6
+        with:
+          # Matches the four matrix-produced intermediate artifacts:
+          # framework_lib_ffi_{linux_x86_64,linux_arm64,windows_x86_64,windows_arm64}_build
+          name: framework_lib_ffi_*_build
