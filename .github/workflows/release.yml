@@ -5,7 +5,6 @@ on:
     types: [published]
 
 permissions:
-  actions: write
   contents: write
 
 env:
@@ -28,7 +27,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build-native:
-    name: Package native library (${{ matrix.os }} ${{ matrix.platform }})
+    name: Build native library (${{ matrix.os }} ${{ matrix.platform }})
     needs: prepare-release
     strategy:
       fail-fast: true
@@ -38,31 +37,40 @@ jobs:
             runsOn: ubuntu-24.04
             platform: linux-x86_64
             artifactName: framework_lib_ffi_linux_x86_64_release
-            archiveName: framework_lib_ffi_linux_x86_64.zip
-            packageDir: linux-x86_64
+            artifactPath: |
+              target/release/libframework_lib_ffi.so
+              csharp/NativeMethods.g.cs
           - os: Linux
             runsOn: ubuntu-24.04-arm
             platform: linux-arm64
             artifactName: framework_lib_ffi_linux_arm64_release
-            archiveName: framework_lib_ffi_linux_arm64.zip
-            packageDir: linux-arm64
+            artifactPath: |
+              target/release/libframework_lib_ffi.so
+              csharp/NativeMethods.g.cs
           - os: Windows
             runsOn: windows-2022
             platform: windows-x86_64
             artifactName: framework_lib_ffi_windows_x86_64_release
-            archiveName: framework_lib_ffi_windows_x86_64.zip
-            packageDir: windows-x86_64
+            artifactPath: |
+              target/release/framework_lib_ffi.dll
+              target/release/framework_lib_ffi.dll.lib
+              target/release/framework_lib_ffi.pdb
+              csharp/NativeMethods.g.cs
           - os: Windows
             runsOn: windows-11-arm
             platform: windows-arm64
             artifactName: framework_lib_ffi_windows_arm64_release
-            archiveName: framework_lib_ffi_windows_arm64.zip
-            packageDir: windows-arm64
+            artifactPath: |
+              target/release/framework_lib_ffi.dll
+              target/release/framework_lib_ffi.dll.lib
+              target/release/framework_lib_ffi.pdb
+              csharp/NativeMethods.g.cs
 
     runs-on: ${{ matrix.runsOn }}
     env:
       RELEASE_TAG: ${{ needs.prepare-release.outputs.tag_name }}
       RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
+      FRAMEWORK_LIB_FFI_RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
 
     steps:
       - uses: actions/checkout@v6
@@ -94,64 +102,45 @@ jobs:
       - name: Check generated bindings are up to date
         run: git diff --exit-code -- csharp/NativeMethods.g.cs
 
-      - name: Create Linux package
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          if [[ -f LICENSE.txt ]]; then
-            license_file="LICENSE.txt"
-          else
-            license_file="LICENSE.md"
-          fi
-          mkdir -p "dist/${{ matrix.packageDir }}"
-          cp target/release/libframework_lib_ffi.so "dist/${{ matrix.packageDir }}/"
-          cp csharp/NativeMethods.g.cs "dist/${{ matrix.packageDir }}/"
-          cp "$license_file" "dist/${{ matrix.packageDir }}/"
-          cd "dist/${{ matrix.packageDir }}"
-          zip -r "../${{ matrix.archiveName }}" .
-
-      - name: Create Windows package
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          if (Test-Path LICENSE.txt) {
-            $licenseFile = 'LICENSE.txt'
-          } else {
-            $licenseFile = 'LICENSE.md'
-          }
-          New-Item -ItemType Directory -Force dist\${{ matrix.packageDir }} | Out-Null
-          Copy-Item target\release\framework_lib_ffi.dll dist\${{ matrix.packageDir }}\
-          Copy-Item target\release\framework_lib_ffi.dll.lib dist\${{ matrix.packageDir }}\
-          Copy-Item target\release\framework_lib_ffi.pdb dist\${{ matrix.packageDir }}\
-          Copy-Item csharp\NativeMethods.g.cs dist\${{ matrix.packageDir }}\
-          Copy-Item $licenseFile dist\${{ matrix.packageDir }}\
-          Compress-Archive -Path dist\${{ matrix.packageDir }}\* -DestinationPath dist\${{ matrix.archiveName }} -Force
-
-      - name: Upload packaged artifact
+      - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifactName }}
-          path: dist/${{ matrix.archiveName }}
+          path: ${{ matrix.artifactPath }}
           if-no-files-found: error
 
   publish:
-    name: Publish release assets
+    name: Upload release assets
     needs:
       - prepare-release
       - build-native
     runs-on: ubuntu-24.04
+    env:
+      RELEASE_TAG: ${{ needs.prepare-release.outputs.tag_name }}
     steps:
-      - name: Download packaged artifacts
+      - name: Download build artifacts
         uses: actions/download-artifact@v8
         with:
           path: dist
 
-      - name: Publish GitHub release assets
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ needs.prepare-release.outputs.tag_name }}
-          files: |
-            dist/framework_lib_ffi_linux_x86_64_release/framework_lib_ffi_linux_x86_64.zip
-            dist/framework_lib_ffi_linux_arm64_release/framework_lib_ffi_linux_arm64.zip
-            dist/framework_lib_ffi_windows_x86_64_release/framework_lib_ffi_windows_x86_64.zip
-            dist/framework_lib_ffi_windows_arm64_release/framework_lib_ffi_windows_arm64.zip
+      - name: Prepare release asset names
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          mv dist/framework_lib_ffi_linux_x86_64_release/libframework_lib_ffi.so release-assets/framework_lib_ffi_linux_x86_64.so
+          mv dist/framework_lib_ffi_linux_arm64_release/libframework_lib_ffi.so release-assets/framework_lib_ffi_linux_arm64.so
+          mv dist/framework_lib_ffi_windows_x86_64_release/framework_lib_ffi.dll release-assets/framework_lib_ffi_windows_x86_64.dll
+          mv dist/framework_lib_ffi_windows_x86_64_release/framework_lib_ffi.dll.lib release-assets/framework_lib_ffi_windows_x86_64.dll.lib
+          mv dist/framework_lib_ffi_windows_x86_64_release/framework_lib_ffi.pdb release-assets/framework_lib_ffi_windows_x86_64.pdb
+          mv dist/framework_lib_ffi_windows_arm64_release/framework_lib_ffi.dll release-assets/framework_lib_ffi_windows_arm64.dll
+          mv dist/framework_lib_ffi_windows_arm64_release/framework_lib_ffi.dll.lib release-assets/framework_lib_ffi_windows_arm64.dll.lib
+          mv dist/framework_lib_ffi_windows_arm64_release/framework_lib_ffi.pdb release-assets/framework_lib_ffi_windows_arm64.pdb
+          mv dist/framework_lib_ffi_linux_x86_64_release/NativeMethods.g.cs release-assets/NativeMethods.g.cs
+
+      - name: Upload assets to published release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -d '' files < <(find release-assets -type f -print0)
+          gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
