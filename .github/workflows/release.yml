@@ -70,7 +70,6 @@ jobs:
     env:
       RELEASE_TAG: ${{ needs.prepare-release.outputs.tag_name }}
       RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
-      FRAMEWORK_LIB_FFI_RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
 
     steps:
       - uses: actions/checkout@v6
@@ -95,8 +94,11 @@ jobs:
         run: |
           echo "Publishing tag ${RELEASE_TAG}"
           echo "Resolved version ${RELEASE_VERSION}"
+          echo "Passing FRAMEWORK_LIB_FFI_RELEASE_VERSION=${RELEASE_VERSION} to cargo build"
 
       - name: Build release
+        env:
+          FRAMEWORK_LIB_FFI_RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
         run: cargo build --release
 
       - name: Check generated bindings are up to date
@@ -128,12 +130,18 @@ jobs:
         run: |
           mkdir -p release-assets
           binding_ref="$(find dist/framework_lib_ffi_linux_x86_64_release -name NativeMethods.g.cs -print -quit)"
-          linux_arm64_binding="$(find dist/framework_lib_ffi_linux_arm64_release -name NativeMethods.g.cs -print -quit)"
-          windows_x86_64_binding="$(find dist/framework_lib_ffi_windows_x86_64_release -name NativeMethods.g.cs -print -quit)"
-          windows_arm64_binding="$(find dist/framework_lib_ffi_windows_arm64_release -name NativeMethods.g.cs -print -quit)"
-          cmp "$binding_ref" "$linux_arm64_binding" || (echo "Error: NativeMethods.g.cs differs between linux-x86_64 and linux-arm64 outputs" && exit 1)
-          cmp "$binding_ref" "$windows_x86_64_binding" || (echo "Error: NativeMethods.g.cs differs between linux-x86_64 and windows-x86_64 outputs" && exit 1)
-          cmp "$binding_ref" "$windows_arm64_binding" || (echo "Error: NativeMethods.g.cs differs between linux-x86_64 and windows-arm64 outputs" && exit 1)
+          [[ -n "$binding_ref" ]] || (echo "Error: NativeMethods.g.cs missing from linux-x86_64 artifact" && exit 1)
+          for binding_source in \
+            "dist/framework_lib_ffi_linux_arm64_release:linux-arm64" \
+            "dist/framework_lib_ffi_windows_x86_64_release:windows-x86_64" \
+            "dist/framework_lib_ffi_windows_arm64_release:windows-arm64"
+          do
+            artifact_dir="${binding_source%%:*}"
+            platform="${binding_source##*:}"
+            binding_path="$(find "$artifact_dir" -name NativeMethods.g.cs -print -quit)"
+            [[ -n "$binding_path" ]] || (echo "Error: NativeMethods.g.cs missing from ${platform} artifact" && exit 1)
+            cmp "$binding_ref" "$binding_path" || (echo "Error: NativeMethods.g.cs differs between linux-x86_64 and ${platform} outputs" && exit 1)
+          done
           mv dist/framework_lib_ffi_linux_x86_64_release/libframework_lib_ffi.so release-assets/framework_lib_ffi_linux_x86_64.so
           mv dist/framework_lib_ffi_linux_arm64_release/libframework_lib_ffi.so release-assets/framework_lib_ffi_linux_arm64.so
           mv dist/framework_lib_ffi_windows_x86_64_release/framework_lib_ffi.dll release-assets/framework_lib_ffi_windows_x86_64.dll
