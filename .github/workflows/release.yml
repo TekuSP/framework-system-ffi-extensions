@@ -129,6 +129,12 @@ jobs:
         shell: bash
         run: |
           mkdir -p release-assets
+          move_asset() {
+            local source_path="$1"
+            local asset_name="$2"
+            [[ -f "$source_path" ]] || { echo "Error: Missing expected asset $source_path"; exit 1; }
+            mv "$source_path" "release-assets/$asset_name"
+          }
           binding_ref="$(find dist/framework_lib_ffi_linux_x86_64_release -name NativeMethods.g.cs -print -quit)"
           [[ -n "$binding_ref" ]] || { echo "Error: NativeMethods.g.cs missing from linux-x86_64 artifact"; exit 1; }
           for binding_source in \
@@ -142,15 +148,15 @@ jobs:
             [[ -n "$binding_path" ]] || { echo "Error: NativeMethods.g.cs missing from ${platform} artifact"; exit 1; }
             cmp "$binding_ref" "$binding_path" || { echo "Error: NativeMethods.g.cs differs between linux-x86_64 and ${platform} outputs"; exit 1; }
           done
-          mv dist/framework_lib_ffi_linux_x86_64_release/libframework_lib_ffi.so release-assets/framework_lib_ffi_linux_x86_64.so
-          mv dist/framework_lib_ffi_linux_arm64_release/libframework_lib_ffi.so release-assets/framework_lib_ffi_linux_arm64.so
-          mv dist/framework_lib_ffi_windows_x86_64_release/framework_lib_ffi.dll release-assets/framework_lib_ffi_windows_x86_64.dll
-          mv dist/framework_lib_ffi_windows_x86_64_release/framework_lib_ffi.dll.lib release-assets/framework_lib_ffi_windows_x86_64.dll.lib
-          mv dist/framework_lib_ffi_windows_x86_64_release/framework_lib_ffi.pdb release-assets/framework_lib_ffi_windows_x86_64.pdb
-          mv dist/framework_lib_ffi_windows_arm64_release/framework_lib_ffi.dll release-assets/framework_lib_ffi_windows_arm64.dll
-          mv dist/framework_lib_ffi_windows_arm64_release/framework_lib_ffi.dll.lib release-assets/framework_lib_ffi_windows_arm64.dll.lib
-          mv dist/framework_lib_ffi_windows_arm64_release/framework_lib_ffi.pdb release-assets/framework_lib_ffi_windows_arm64.pdb
-          mv "$binding_ref" release-assets/NativeMethods.g.cs
+          move_asset dist/framework_lib_ffi_linux_x86_64_release/libframework_lib_ffi.so framework_lib_ffi_linux_x86_64.so
+          move_asset dist/framework_lib_ffi_linux_arm64_release/libframework_lib_ffi.so framework_lib_ffi_linux_arm64.so
+          move_asset dist/framework_lib_ffi_windows_x86_64_release/framework_lib_ffi.dll framework_lib_ffi_windows_x86_64.dll
+          move_asset dist/framework_lib_ffi_windows_x86_64_release/framework_lib_ffi.dll.lib framework_lib_ffi_windows_x86_64.dll.lib
+          move_asset dist/framework_lib_ffi_windows_x86_64_release/framework_lib_ffi.pdb framework_lib_ffi_windows_x86_64.pdb
+          move_asset dist/framework_lib_ffi_windows_arm64_release/framework_lib_ffi.dll framework_lib_ffi_windows_arm64.dll
+          move_asset dist/framework_lib_ffi_windows_arm64_release/framework_lib_ffi.dll.lib framework_lib_ffi_windows_arm64.dll.lib
+          move_asset dist/framework_lib_ffi_windows_arm64_release/framework_lib_ffi.pdb framework_lib_ffi_windows_arm64.pdb
+          move_asset "$binding_ref" NativeMethods.g.cs
 
       - name: Upload assets to published release
         shell: bash
@@ -158,4 +164,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mapfile -d '' files < <(find release-assets -type f -print0)
+          ((${#files[@]} > 0)) || { echo "Error: No release assets were prepared for upload"; exit 1; }
           gh release upload "$RELEASE_TAG" "${files[@]}" --clobber --repo "${{ github.repository }}"
