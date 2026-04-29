@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   build-native:
     name: Build native library (${{ matrix.os }} ${{ matrix.platform }})
