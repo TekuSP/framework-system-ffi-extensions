@@ -370,7 +370,7 @@ dependencies = [
 
 [[package]]
 name = "framework_lib"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "built",
  "clap",
@@ -406,7 +406,7 @@ dependencies = [
 
 [[package]]
 name = "framework_lib_ffi"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "csbindgen",
  "framework_lib",
