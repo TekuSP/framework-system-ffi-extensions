@@ -1,122 +1,29 @@
-use std::collections::VecDeque;
-use std::convert::TryFrom;
-use std::ptr;
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{Mutex, OnceLock};
-
-use framework_lib::chromium_ec::command::EcRequestRaw;
-use framework_lib::chromium_ec::commands::{EcFeatureCode, EcRequestGetFeatures};
-use framework_lib::chromium_ec::{
-    CrosEc, CrosEcDriver, CrosEcDriverType, EcCurrentImage, EcError, EcResponseStatus,
-};
+use framework_lib::chromium_ec::CrosEc;
 use framework_lib::power;
 use framework_lib::smbios;
-use framework_lib::smbios::{Platform, PlatformFamily};
 
-const STORED_DEVICE_ERROR_LIMIT: usize = 64;
-#[cfg(target_os = "linux")]
-const CROS_EC_DEV_PATH: &str = "/dev/cros_ec";
-const THERMAL_SENSOR_COUNT: usize = 8;
-const FAN_SLOT_COUNT: usize = 4;
-const EC_MEMMAP_TEMP_SENSOR: u16 = 0x00;
-const EC_MEMMAP_FAN: u16 = 0x10;
-const EC_FAN_SPEED_STALLED_DEPRECATED: u16 = 0xFFFE;
-const EC_FAN_SPEED_NOT_PRESENT: u16 = 0xFFFF;
+mod abi_impls;
+mod byte_buffer;
+mod gpu_descriptor;
+mod inventory;
+mod results;
+mod runtime;
+mod status;
+mod thermal;
 
-static NEXT_DEVICE_ERROR_ID: AtomicI32 = AtomicI32::new(1);
-static DEVICE_ERROR_MESSAGES: OnceLock<Mutex<VecDeque<(i32, String)>>> = OnceLock::new();
+use results::{
+    active_driver_result, build_info_result, default_ec_flash_versions, fan_capabilities_result,
+    flash_versions_result, gpu_descriptor_header_result, gpu_descriptor_read_result,
+    gpu_descriptor_validation_result, platform_family_result, platform_result,
+    power_snapshot_result, product_name_result, restore_auto_fan_control_result,
+    set_fan_duty_result, set_fan_rpm_result, status_description_result,
+    status_device_error_message_result, thermal_snapshot_result,
+};
+use runtime::{parse_optional_fan_index, parse_optional_fan_index_u8, require_handle};
+use status::{get_device_error_message, status_description};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ThermalSensorStatus {
-    Ok,
-    NotPresent,
-    Error,
-    NotPowered,
-    NotCalibrated,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ThermalSensorReading {
-    status: ThermalSensorStatus,
-    celsius: i16,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ThermalSnapshot {
-    temperatures: [ThermalSensorReading; THERMAL_SENSOR_COUNT],
-    fan_rpms: [u16; FAN_SLOT_COUNT],
-    fan_present: [bool; FAN_SLOT_COUNT],
-    fan_stalled: [bool; FAN_SLOT_COUNT],
-    fan_count: u8,
-}
-
-fn parse_temp_sensor(byte: u8) -> ThermalSensorReading {
-    match byte {
-        0xFF => ThermalSensorReading {
-            status: ThermalSensorStatus::NotPresent,
-            celsius: 0,
-        },
-        0xFE => ThermalSensorReading {
-            status: ThermalSensorStatus::Error,
-            celsius: 0,
-        },
-        0xFD => ThermalSensorReading {
-            status: ThermalSensorStatus::NotPowered,
-            celsius: 0,
-        },
-        0xFC => ThermalSensorReading {
-            status: ThermalSensorStatus::NotCalibrated,
-            celsius: 0,
-        },
-        value => ThermalSensorReading {
-            status: ThermalSensorStatus::Ok,
-            celsius: i16::from(value) - 73,
-        },
-    }
-}
-
-fn thermal_snapshot(ec: &CrosEc) -> Option<ThermalSnapshot> {
-    let temps = ec.read_memory(EC_MEMMAP_TEMP_SENSOR, 0x0F)?;
-    let fans = ec.read_memory(EC_MEMMAP_FAN, 0x08)?;
-
-    let mut temperatures = [ThermalSensorReading {
-        status: ThermalSensorStatus::NotPresent,
-        celsius: 0,
-    }; THERMAL_SENSOR_COUNT];
-    for (index, byte) in temps.iter().take(THERMAL_SENSOR_COUNT).enumerate() {
-        temperatures[index] = parse_temp_sensor(*byte);
-    }
-
-    let mut fan_rpms = [0u16; FAN_SLOT_COUNT];
-    let mut fan_present = [false; FAN_SLOT_COUNT];
-    let mut fan_stalled = [false; FAN_SLOT_COUNT];
-    let mut fan_count = 0u8;
-
-    for index in 0..FAN_SLOT_COUNT {
-        let fan = u16::from_le_bytes([fans[index * 2], fans[1 + index * 2]]);
-        match fan {
-            EC_FAN_SPEED_NOT_PRESENT => {}
-            EC_FAN_SPEED_STALLED_DEPRECATED => {
-                fan_present[index] = true;
-                fan_stalled[index] = true;
-                fan_count += 1;
-            }
-            rpm => {
-                fan_rpms[index] = rpm;
-                fan_present[index] = true;
-                fan_count += 1;
-            }
-        }
-    }
-
-    Some(ThermalSnapshot {
-        temperatures,
-        fan_rpms,
-        fan_present,
-        fan_stalled,
-        fan_count,
-    })
-}
+pub(crate) use runtime::feature_enabled;
+pub(crate) use status::status_from_error;
 
 pub struct FrameworkEcHandle {
     ec: CrosEc,
@@ -184,113 +91,6 @@ pub struct FrameworkStatus {
     pub payload: FrameworkStatusPayload,
 }
 
-impl FrameworkStatus {
-    fn success() -> Self {
-        Self::no_payload(FrameworkStatusCode::Success)
-    }
-
-    fn with(code: FrameworkStatusCode, detail: i32) -> Self {
-        match code {
-            FrameworkStatusCode::Success => Self::success(),
-            FrameworkStatusCode::NullPointer => Self::no_payload(FrameworkStatusCode::NullPointer),
-            FrameworkStatusCode::InvalidArgument => Self::invalid_fan_index(detail),
-            FrameworkStatusCode::NoDriverAvailable => {
-                Self::no_payload(FrameworkStatusCode::NoDriverAvailable)
-            }
-            FrameworkStatusCode::UnsupportedDriver => {
-                Self::no_payload(FrameworkStatusCode::UnsupportedDriver)
-            }
-            FrameworkStatusCode::DeviceError => Self::device_error(detail),
-            FrameworkStatusCode::EcResponse => {
-                Self::ec_response(ec_response_detail_from_raw(detail))
-            }
-            FrameworkStatusCode::UnknownResponseCode => Self::unknown_response_code(detail),
-            FrameworkStatusCode::DataUnavailable => {
-                Self::no_payload(FrameworkStatusCode::DataUnavailable)
-            }
-        }
-    }
-
-    fn no_payload(code: FrameworkStatusCode) -> Self {
-        Self {
-            code,
-            payload: FrameworkStatusPayload {
-                none: FrameworkStatusNoPayload { reserved: 0 },
-            },
-        }
-    }
-
-    fn invalid_fan_index(fan_index: i32) -> Self {
-        Self {
-            code: FrameworkStatusCode::InvalidArgument,
-            payload: FrameworkStatusPayload {
-                invalid_fan_index: FrameworkStatusInvalidFanIndexRecord { fan_index },
-            },
-        }
-    }
-
-    fn ec_response(response: FrameworkEcResponseDetail) -> Self {
-        Self {
-            code: FrameworkStatusCode::EcResponse,
-            payload: FrameworkStatusPayload {
-                ec_response: FrameworkStatusEcResponseRecord { response },
-            },
-        }
-    }
-
-    fn unknown_response_code(response_code: i32) -> Self {
-        Self {
-            code: FrameworkStatusCode::UnknownResponseCode,
-            payload: FrameworkStatusPayload {
-                unknown_ec_response_code: FrameworkStatusUnknownEcResponseCodeRecord {
-                    response_code,
-                },
-            },
-        }
-    }
-
-    fn device_error(message_token: i32) -> Self {
-        Self {
-            code: FrameworkStatusCode::DeviceError,
-            payload: FrameworkStatusPayload {
-                device_error: FrameworkStatusDeviceErrorRecord { message_token },
-            },
-        }
-    }
-
-    fn invalid_fan_index_value(&self) -> Option<i32> {
-        if self.code != FrameworkStatusCode::InvalidArgument {
-            return None;
-        }
-
-        Some(unsafe { self.payload.invalid_fan_index.fan_index })
-    }
-
-    fn ec_response_detail(&self) -> Option<FrameworkEcResponseDetail> {
-        if self.code != FrameworkStatusCode::EcResponse {
-            return None;
-        }
-
-        Some(unsafe { self.payload.ec_response.response })
-    }
-
-    fn unknown_response_code_value(&self) -> Option<i32> {
-        if self.code != FrameworkStatusCode::UnknownResponseCode {
-            return None;
-        }
-
-        Some(unsafe { self.payload.unknown_ec_response_code.response_code })
-    }
-
-    fn device_error_message_token(&self) -> Option<i32> {
-        if self.code != FrameworkStatusCode::DeviceError {
-            return None;
-        }
-
-        Some(unsafe { self.payload.device_error.message_token })
-    }
-}
-
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameworkEcResponseDetail {
@@ -314,30 +114,6 @@ pub enum FrameworkEcResponseDetail {
     Busy = 16,
 }
 
-impl From<EcResponseStatus> for FrameworkEcResponseDetail {
-    fn from(value: EcResponseStatus) -> Self {
-        match value {
-            EcResponseStatus::Success => FrameworkEcResponseDetail::Success,
-            EcResponseStatus::InvalidCommand => FrameworkEcResponseDetail::InvalidCommand,
-            EcResponseStatus::Error => FrameworkEcResponseDetail::Error,
-            EcResponseStatus::InvalidParameter => FrameworkEcResponseDetail::InvalidParameter,
-            EcResponseStatus::AccessDenied => FrameworkEcResponseDetail::AccessDenied,
-            EcResponseStatus::InvalidResponse => FrameworkEcResponseDetail::InvalidResponse,
-            EcResponseStatus::InvalidVersion => FrameworkEcResponseDetail::InvalidVersion,
-            EcResponseStatus::InvalidChecksum => FrameworkEcResponseDetail::InvalidChecksum,
-            EcResponseStatus::InProgress => FrameworkEcResponseDetail::InProgress,
-            EcResponseStatus::Unavailable => FrameworkEcResponseDetail::Unavailable,
-            EcResponseStatus::Timeout => FrameworkEcResponseDetail::Timeout,
-            EcResponseStatus::Overflow => FrameworkEcResponseDetail::Overflow,
-            EcResponseStatus::InvalidHeader => FrameworkEcResponseDetail::InvalidHeader,
-            EcResponseStatus::RequestTruncated => FrameworkEcResponseDetail::RequestTruncated,
-            EcResponseStatus::ResponseTooBig => FrameworkEcResponseDetail::ResponseTooBig,
-            EcResponseStatus::BusError => FrameworkEcResponseDetail::BusError,
-            EcResponseStatus::Busy => FrameworkEcResponseDetail::Busy,
-        }
-    }
-}
-
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameworkEcDriver {
@@ -345,29 +121,6 @@ pub enum FrameworkEcDriver {
     Portio = 0,
     CrosEc = 1,
     Windows = 2,
-}
-
-impl From<CrosEcDriverType> for FrameworkEcDriver {
-    fn from(value: CrosEcDriverType) -> Self {
-        match value {
-            CrosEcDriverType::Portio => FrameworkEcDriver::Portio,
-            CrosEcDriverType::CrosEc => FrameworkEcDriver::CrosEc,
-            CrosEcDriverType::Windows => FrameworkEcDriver::Windows,
-        }
-    }
-}
-
-impl TryFrom<FrameworkEcDriver> for CrosEcDriverType {
-    type Error = ();
-
-    fn try_from(value: FrameworkEcDriver) -> Result<Self, Self::Error> {
-        match value {
-            FrameworkEcDriver::Unknown => Err(()),
-            FrameworkEcDriver::Portio => Ok(CrosEcDriverType::Portio),
-            FrameworkEcDriver::CrosEc => Ok(CrosEcDriverType::CrosEc),
-            FrameworkEcDriver::Windows => Ok(CrosEcDriverType::Windows),
-        }
-    }
 }
 
 #[repr(i32)]
@@ -388,26 +141,6 @@ pub enum FrameworkPlatform {
     IntelCoreUltra3 = 12,
 }
 
-impl From<Platform> for FrameworkPlatform {
-    fn from(value: Platform) -> Self {
-        match value {
-            Platform::Framework12IntelGen13 => FrameworkPlatform::Framework12IntelGen13,
-            Platform::IntelGen11 => FrameworkPlatform::IntelGen11,
-            Platform::IntelGen12 => FrameworkPlatform::IntelGen12,
-            Platform::IntelGen13 => FrameworkPlatform::IntelGen13,
-            Platform::IntelCoreUltra1 => FrameworkPlatform::IntelCoreUltra1,
-            Platform::IntelCoreUltra3 => FrameworkPlatform::IntelCoreUltra3,
-            Platform::Framework13Amd7080 => FrameworkPlatform::Framework13Amd7080,
-            Platform::Framework13AmdAi300 => FrameworkPlatform::Framework13AmdAi300,
-            Platform::Framework16Amd7080 => FrameworkPlatform::Framework16Amd7080,
-            Platform::Framework16AmdAi300 => FrameworkPlatform::Framework16AmdAi300,
-            Platform::FrameworkDesktopAmdAiMax300 => FrameworkPlatform::FrameworkDesktopAmdAiMax300,
-            Platform::GenericFramework(..) => FrameworkPlatform::GenericFramework,
-            Platform::UnknownSystem => FrameworkPlatform::UnknownSystem,
-        }
-    }
-}
-
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameworkPlatformFamily {
@@ -416,17 +149,6 @@ pub enum FrameworkPlatformFamily {
     Framework13 = 1,
     Framework16 = 2,
     FrameworkDesktop = 3,
-}
-
-impl From<PlatformFamily> for FrameworkPlatformFamily {
-    fn from(value: PlatformFamily) -> Self {
-        match value {
-            PlatformFamily::Framework12 => FrameworkPlatformFamily::Framework12,
-            PlatformFamily::Framework13 => FrameworkPlatformFamily::Framework13,
-            PlatformFamily::Framework16 => FrameworkPlatformFamily::Framework16,
-            PlatformFamily::FrameworkDesktop => FrameworkPlatformFamily::FrameworkDesktop,
-        }
-    }
 }
 
 #[repr(C)]
@@ -453,34 +175,12 @@ pub enum FrameworkTemperatureState {
     NotCalibrated = 4,
 }
 
-impl From<ThermalSensorStatus> for FrameworkTemperatureState {
-    fn from(value: ThermalSensorStatus) -> Self {
-        match value {
-            ThermalSensorStatus::Ok => FrameworkTemperatureState::Ok,
-            ThermalSensorStatus::NotPresent => FrameworkTemperatureState::NotPresent,
-            ThermalSensorStatus::Error => FrameworkTemperatureState::Error,
-            ThermalSensorStatus::NotPowered => FrameworkTemperatureState::NotPowered,
-            ThermalSensorStatus::NotCalibrated => FrameworkTemperatureState::NotCalibrated,
-        }
-    }
-}
-
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameworkEcCurrentImage {
     Unknown = 0,
     Ro = 1,
     Rw = 2,
-}
-
-impl From<EcCurrentImage> for FrameworkEcCurrentImage {
-    fn from(value: EcCurrentImage) -> Self {
-        match value {
-            EcCurrentImage::Unknown => FrameworkEcCurrentImage::Unknown,
-            EcCurrentImage::RO => FrameworkEcCurrentImage::Ro,
-            EcCurrentImage::RW => FrameworkEcCurrentImage::Rw,
-        }
-    }
 }
 
 #[repr(C)]
@@ -607,40 +307,6 @@ pub struct FrameworkByteBuffer {
     pub capacity: i32,
 }
 
-impl Default for FrameworkByteBuffer {
-    fn default() -> Self {
-        Self {
-            ptr: ptr::null_mut(),
-            length: 0,
-            capacity: 0,
-        }
-    }
-}
-
-impl FrameworkByteBuffer {
-    fn from_vec(bytes: Vec<u8>) -> Self {
-        let length = i32::try_from(bytes.len()).expect("buffer length overflowed i32");
-        let capacity = i32::try_from(bytes.capacity()).expect("buffer capacity overflowed i32");
-        let mut bytes = std::mem::ManuallyDrop::new(bytes);
-
-        Self {
-            ptr: bytes.as_mut_ptr(),
-            length,
-            capacity,
-        }
-    }
-
-    unsafe fn destroy(self) {
-        if self.ptr.is_null() {
-            return;
-        }
-
-        let length = usize::try_from(self.length).expect("negative buffer length");
-        let capacity = usize::try_from(self.capacity).expect("negative buffer capacity");
-        drop(Vec::from_raw_parts(self.ptr, length, capacity));
-    }
-}
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FrameworkEcHandleResult {
@@ -734,472 +400,280 @@ pub struct FrameworkEcRestoreAutoFanControlResult {
     pub fan_index: i32,
 }
 
-fn device_error_messages() -> &'static Mutex<VecDeque<(i32, String)>> {
-    DEVICE_ERROR_MESSAGES.get_or_init(|| Mutex::new(VecDeque::new()))
+#[repr(u64)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkEcFeatureFlag {
+    None = 0,
+    Keyboard = 1 << 0,
+    KeyboardBacklight = 1 << 1,
+    Touchpad = 1 << 2,
+    Fingerprint = 1 << 3,
+    AmbientLight = 1 << 4,
+    TabletMode = 1 << 5,
 }
 
-fn store_device_error_message(message: String) -> i32 {
-    let id = NEXT_DEVICE_ERROR_ID.fetch_add(1, Ordering::Relaxed);
-    let mut messages = device_error_messages()
-        .lock()
-        .expect("device error message lock poisoned");
-    messages.push_back((id, message));
-    while messages.len() > STORED_DEVICE_ERROR_LIMIT {
-        messages.pop_front();
-    }
-    id
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkFingerprintLedLevel {
+    Unknown = -1,
+    High = 0,
+    Medium = 1,
+    Low = 2,
+    UltraLow = 3,
+    Custom = 0xFE,
+    Auto = 0xFF,
 }
 
-fn get_device_error_message(detail: i32) -> Option<String> {
-    if detail <= 0 {
-        return None;
-    }
-
-    let messages = device_error_messages().lock().ok()?;
-    messages
-        .iter()
-        .find(|(id, _)| *id == detail)
-        .map(|(_, message)| message.clone())
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkExpansionBayBoard {
+    Unknown = 0,
+    DualInterposer = 1,
+    SingleInterposer = 2,
+    UmaFans = 3,
+    NoModule = 4,
+    BadConnection = 5,
 }
 
-fn ec_response_detail_from_raw(detail: i32) -> FrameworkEcResponseDetail {
-    match detail {
-        0 => FrameworkEcResponseDetail::Success,
-        1 => FrameworkEcResponseDetail::InvalidCommand,
-        2 => FrameworkEcResponseDetail::Error,
-        3 => FrameworkEcResponseDetail::InvalidParameter,
-        4 => FrameworkEcResponseDetail::AccessDenied,
-        5 => FrameworkEcResponseDetail::InvalidResponse,
-        6 => FrameworkEcResponseDetail::InvalidVersion,
-        7 => FrameworkEcResponseDetail::InvalidChecksum,
-        8 => FrameworkEcResponseDetail::InProgress,
-        9 => FrameworkEcResponseDetail::Unavailable,
-        10 => FrameworkEcResponseDetail::Timeout,
-        11 => FrameworkEcResponseDetail::Overflow,
-        12 => FrameworkEcResponseDetail::InvalidHeader,
-        13 => FrameworkEcResponseDetail::RequestTruncated,
-        14 => FrameworkEcResponseDetail::ResponseTooBig,
-        15 => FrameworkEcResponseDetail::BusError,
-        16 => FrameworkEcResponseDetail::Busy,
-        _ => FrameworkEcResponseDetail::Unknown,
-    }
-}
-fn ec_response_detail_name(detail: FrameworkEcResponseDetail) -> &'static str {
-    match detail {
-        FrameworkEcResponseDetail::Unknown => "Unknown",
-        FrameworkEcResponseDetail::Success => "Success",
-        FrameworkEcResponseDetail::InvalidCommand => "InvalidCommand",
-        FrameworkEcResponseDetail::Error => "Error",
-        FrameworkEcResponseDetail::InvalidParameter => "InvalidParameter",
-        FrameworkEcResponseDetail::AccessDenied => "AccessDenied",
-        FrameworkEcResponseDetail::InvalidResponse => "InvalidResponse",
-        FrameworkEcResponseDetail::InvalidVersion => "InvalidVersion",
-        FrameworkEcResponseDetail::InvalidChecksum => "InvalidChecksum",
-        FrameworkEcResponseDetail::InProgress => "InProgress",
-        FrameworkEcResponseDetail::Unavailable => "Unavailable",
-        FrameworkEcResponseDetail::Timeout => "Timeout",
-        FrameworkEcResponseDetail::Overflow => "Overflow",
-        FrameworkEcResponseDetail::InvalidHeader => "InvalidHeader",
-        FrameworkEcResponseDetail::RequestTruncated => "RequestTruncated",
-        FrameworkEcResponseDetail::ResponseTooBig => "ResponseTooBig",
-        FrameworkEcResponseDetail::BusError => "BusError",
-        FrameworkEcResponseDetail::Busy => "Busy",
-    }
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkExpansionBayVendor {
+    Unknown = 0,
+    Initializing = 1,
+    FanOnly = 2,
+    SsdHolder = 3,
+    PcieAccessory = 4,
+    AmdGpu = 5,
+    NvidiaGpu = 6,
 }
 
-fn default_ec_flash_versions() -> FrameworkEcFlashVersions {
-    FrameworkEcFlashVersions {
-        current_image: FrameworkEcCurrentImage::Unknown,
-        ro_version: FrameworkByteBuffer::default(),
-        rw_version: FrameworkByteBuffer::default(),
-    }
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkGpuPcieConfig {
+    Unknown = 0,
+    Pcie4x1 = 1,
+    Pcie4x2 = 2,
+    Pcie4x4 = 3,
+    Pcie5x4 = 4,
 }
 
-fn default_battery_snapshot() -> FrameworkBatterySnapshot {
-    FrameworkBatterySnapshot {
-        battery_state: FrameworkBatteryState::NotPresent,
-        reserved: [0; 3],
-        present_voltage: 0,
-        present_rate: 0,
-        remaining_capacity: 0,
-        design_capacity: 0,
-        design_voltage: 0,
-        last_full_charge_capacity: 0,
-        cycle_count: 0,
-        charge_percentage: 0,
-        manufacturer: FrameworkByteBuffer::default(),
-        model_number: FrameworkByteBuffer::default(),
-        serial_number: FrameworkByteBuffer::default(),
-        battery_type: FrameworkByteBuffer::default(),
-    }
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkModuleIdentity {
+    None = 0,
+    UnknownUsbCOccupant = 1,
+    DpExpansionCard = 2,
+    HdmiExpansionCard = 3,
+    AudioExpansionCard = 4,
+    Framework16KeyboardModule = 5,
+    Framework16LedMatrix = 6,
+    Framework16TouchpadModule = 7,
+    InternalKeyboard = 8,
+    InternalTouchpad = 9,
+    FingerprintReader = 10,
+    Touchscreen = 11,
+    Webcam = 12,
+    ExpansionBay = 13,
+    ExpansionBayDualInterposer = 14,
+    ExpansionBaySingleInterposer = 15,
+    ExpansionBayUmaFans = 16,
+    ExpansionBaySsdHolder = 17,
+    ExpansionBayPcieAccessory = 18,
+    ExpansionBayAmdGpu = 19,
+    ExpansionBayNvidiaGpu = 20,
+    ExpansionBayFanOnly = 21,
 }
 
-fn default_power_snapshot() -> FrameworkPowerSnapshot {
-    FrameworkPowerSnapshot {
-        power_source_state: FrameworkPowerSourceState::None,
-        battery_count: 0,
-        reserved: [0; 2],
-        battery_0: default_battery_snapshot(),
-    }
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkModuleBus {
+    Unknown = 0,
+    Ec = 1,
+    Usb = 2,
+    Hid = 3,
+    Composite = 4,
 }
 
-fn default_fan_capabilities() -> FrameworkFanCapabilities {
-    FrameworkFanCapabilities {
-        fan_count: 0,
-        features: FrameworkFanFeaturesState::None,
-        reserved: [0; 2],
-    }
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkModuleSlotKind {
+    None = 0,
+    UsbCPort = 1,
+    InputDeckTopRow = 2,
+    InputDeckTouchpad = 3,
+    ExpansionBay = 4,
+    InternalFixed = 5,
+    Detached = 6,
 }
 
-fn fan_features_state(
-    supports_fan_control: bool,
-    supports_thermal_reporting: bool,
-) -> FrameworkFanFeaturesState {
-    match (supports_fan_control, supports_thermal_reporting) {
-        (false, false) => FrameworkFanFeaturesState::None,
-        (true, false) => FrameworkFanFeaturesState::FanControl,
-        (false, true) => FrameworkFanFeaturesState::ThermalReporting,
-        (true, true) => FrameworkFanFeaturesState::All,
-    }
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkModuleConfidence {
+    Unknown = 0,
+    DerivedWeak = 1,
+    DerivedStrong = 2,
+    Direct = 3,
 }
 
-fn power_source_state(ac_present: bool, battery_present: bool) -> FrameworkPowerSourceState {
-    match (ac_present, battery_present) {
-        (false, false) => FrameworkPowerSourceState::None,
-        (true, false) => FrameworkPowerSourceState::AcOnly,
-        (false, true) => FrameworkPowerSourceState::BatteryOnly,
-        (true, true) => FrameworkPowerSourceState::AcAndBattery,
-    }
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkModuleFlag {
+    BuiltIn = 1 << 0,
+    Active = 1 << 1,
+    Connected = 1 << 2,
+    Fault = 1 << 3,
+    Ambiguous = 1 << 4,
+    HasPdContract = 1 << 5,
+    DisplayAltMode = 1 << 6,
+    DoorClosed = 1 << 7,
+    Enabled = 1 << 8,
 }
 
-fn battery_state(level_critical: bool, discharging: bool, charging: bool) -> FrameworkBatteryState {
-    if level_critical {
-        FrameworkBatteryState::Critical
-    } else {
-        match (discharging, charging) {
-            (false, false) => FrameworkBatteryState::Idle,
-            (false, true) => FrameworkBatteryState::Charging,
-            (true, false) => FrameworkBatteryState::Discharging,
-            (true, true) => FrameworkBatteryState::ChargingAndDischarging,
-        }
-    }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcFeatureFlagsResult {
+    pub status: FrameworkStatus,
+    pub flags: u64,
 }
 
-fn default_temperature_reading() -> FrameworkTemperatureReading {
-    FrameworkTemperatureReading {
-        state: FrameworkTemperatureState::NotPresent,
-        celsius: 0,
-        reserved: 0,
-    }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcKeyboardBacklightResult {
+    pub status: FrameworkStatus,
+    pub brightness_percent: u8,
+    pub reserved: [u8; 3],
 }
 
-fn default_fan_reading() -> FrameworkFanReading {
-    FrameworkFanReading {
-        state: FrameworkFanState::NotPresent,
-        rpm: 0,
-        reserved: 0,
-    }
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameworkEcFingerprintLedState {
+    pub raw_level: u8,
+    pub reserved: [u8; 3],
+    pub level: FrameworkFingerprintLedLevel,
 }
 
-fn fan_state(present: bool, stalled: bool) -> FrameworkFanState {
-    if !present {
-        FrameworkFanState::NotPresent
-    } else if stalled {
-        FrameworkFanState::Stalled
-    } else {
-        FrameworkFanState::Ok
-    }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcFingerprintLedResult {
+    pub status: FrameworkStatus,
+    pub state: FrameworkEcFingerprintLedState,
 }
 
-fn default_thermal_snapshot() -> FrameworkThermalSnapshot {
-    let temperature = default_temperature_reading();
-    let fan = default_fan_reading();
-
-    FrameworkThermalSnapshot {
-        fan_count: 0,
-        reserved: [0; 3],
-        temperature_0: temperature,
-        temperature_1: temperature,
-        temperature_2: temperature,
-        temperature_3: temperature,
-        temperature_4: temperature,
-        temperature_5: temperature,
-        temperature_6: temperature,
-        temperature_7: temperature,
-        fan_0: fan,
-        fan_1: fan,
-        fan_2: fan,
-        fan_3: fan,
-    }
+#[repr(C)]
+#[derive(Clone)]
+pub struct FrameworkEcExpansionBayStatus {
+    pub present: u8,
+    pub enabled: u8,
+    pub fault: u8,
+    pub door_closed: u8,
+    pub board: FrameworkExpansionBayBoard,
+    pub vendor: FrameworkExpansionBayVendor,
+    pub config: FrameworkGpuPcieConfig,
+    pub reserved: [u8; 3],
+    pub serial_number: FrameworkByteBuffer,
 }
 
-fn ec_handle_result(
-    status: FrameworkStatus,
-    handle: *mut FrameworkEcHandle,
-) -> FrameworkEcHandleResult {
-    FrameworkEcHandleResult { status, handle }
+#[repr(C)]
+#[derive(Clone)]
+pub struct FrameworkEcExpansionBayStatusResult {
+    pub status: FrameworkStatus,
+    pub bay: FrameworkEcExpansionBayStatus,
 }
 
-fn product_name_result(
-    status: FrameworkStatus,
-    product_name: FrameworkByteBuffer,
-) -> FrameworkProductNameResult {
-    FrameworkProductNameResult {
-        status,
-        product_name,
-    }
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameworkGpuDescriptorHeader {
+    pub magic: [u8; 4],
+    pub length: u32,
+    pub desc_ver_major: u16,
+    pub desc_ver_minor: u16,
+    pub hardware_version: u16,
+    pub hardware_revision: u16,
+    pub serial: [u8; 20],
+    pub descriptor_length: u32,
+    pub descriptor_crc32: u32,
+    pub crc32: u32,
 }
 
-fn build_info_result(
-    status: FrameworkStatus,
-    build_info: FrameworkByteBuffer,
-) -> FrameworkEcBuildInfoResult {
-    FrameworkEcBuildInfoResult { status, build_info }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcGpuDescriptorHeaderResult {
+    pub status: FrameworkStatus,
+    pub header: FrameworkGpuDescriptorHeader,
 }
 
-fn flash_versions_result(
-    status: FrameworkStatus,
-    versions: FrameworkEcFlashVersions,
-) -> FrameworkEcFlashVersionsResult {
-    FrameworkEcFlashVersionsResult { status, versions }
+#[repr(C)]
+#[derive(Clone)]
+pub struct FrameworkEcGpuDescriptorReadResult {
+    pub status: FrameworkStatus,
+    pub descriptor: FrameworkByteBuffer,
 }
 
-fn power_snapshot_result(
-    status: FrameworkStatus,
-    snapshot: FrameworkPowerSnapshot,
-) -> FrameworkEcPowerSnapshotResult {
-    FrameworkEcPowerSnapshotResult { status, snapshot }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcGpuDescriptorValidationResult {
+    pub status: FrameworkStatus,
+    pub is_match: u8,
+    pub reserved: [u8; 3],
 }
 
-fn fan_capabilities_result(
-    status: FrameworkStatus,
-    capabilities: FrameworkFanCapabilities,
-) -> FrameworkEcFanCapabilitiesResult {
-    FrameworkEcFanCapabilitiesResult {
-        status,
-        capabilities,
-    }
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameworkModuleDescriptor {
+    pub identity: FrameworkModuleIdentity,
+    pub bus: FrameworkModuleBus,
+    pub slot_kind: FrameworkModuleSlotKind,
+    pub confidence: FrameworkModuleConfidence,
+    pub present: u8,
+    pub reserved_0: [u8; 3],
+    pub slot_index: i32,
+    pub flags: u32,
+    pub vendor_id: u32,
+    pub product_id: u32,
+    pub board_id: i32,
 }
 
-fn thermal_snapshot_result(
-    status: FrameworkStatus,
-    snapshot: FrameworkThermalSnapshot,
-) -> FrameworkEcThermalSnapshotResult {
-    FrameworkEcThermalSnapshotResult { status, snapshot }
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameworkModuleInventory {
+    pub usb_c_slot_count: u8,
+    pub input_top_row_count: u8,
+    pub detached_count: u8,
+    pub reserved_0: u8,
+    pub usb_c_slot_0: FrameworkModuleDescriptor,
+    pub usb_c_slot_1: FrameworkModuleDescriptor,
+    pub usb_c_slot_2: FrameworkModuleDescriptor,
+    pub usb_c_slot_3: FrameworkModuleDescriptor,
+    pub usb_c_slot_4: FrameworkModuleDescriptor,
+    pub usb_c_slot_5: FrameworkModuleDescriptor,
+    pub input_top_row_0: FrameworkModuleDescriptor,
+    pub input_top_row_1: FrameworkModuleDescriptor,
+    pub input_top_row_2: FrameworkModuleDescriptor,
+    pub input_top_row_3: FrameworkModuleDescriptor,
+    pub input_top_row_4: FrameworkModuleDescriptor,
+    pub input_touchpad: FrameworkModuleDescriptor,
+    pub internal_keyboard: FrameworkModuleDescriptor,
+    pub internal_touchpad: FrameworkModuleDescriptor,
+    pub fingerprint_reader: FrameworkModuleDescriptor,
+    pub touchscreen: FrameworkModuleDescriptor,
+    pub webcam: FrameworkModuleDescriptor,
+    pub expansion_bay: FrameworkModuleDescriptor,
+    pub detached_0: FrameworkModuleDescriptor,
+    pub detached_1: FrameworkModuleDescriptor,
+    pub detached_2: FrameworkModuleDescriptor,
+    pub detached_3: FrameworkModuleDescriptor,
 }
 
-fn active_driver_result(
-    status: FrameworkStatus,
-    driver: FrameworkEcDriver,
-) -> FrameworkEcActiveDriverResult {
-    FrameworkEcActiveDriverResult { status, driver }
-}
-
-fn status_device_error_message_result(
-    status: FrameworkStatus,
-    message: FrameworkByteBuffer,
-) -> FrameworkStatusDeviceErrorMessageResult {
-    FrameworkStatusDeviceErrorMessageResult { status, message }
-}
-
-fn status_description_result(
-    status: FrameworkStatus,
-    description: FrameworkByteBuffer,
-) -> FrameworkStatusDescriptionResult {
-    FrameworkStatusDescriptionResult {
-        status,
-        description,
-    }
-}
-
-fn platform_result(
-    status: FrameworkStatus,
-    platform: FrameworkPlatform,
-) -> FrameworkPlatformResult {
-    FrameworkPlatformResult { status, platform }
-}
-
-fn platform_family_result(
-    status: FrameworkStatus,
-    family: FrameworkPlatformFamily,
-) -> FrameworkPlatformFamilyResult {
-    FrameworkPlatformFamilyResult { status, family }
-}
-
-fn set_fan_rpm_result(
-    status: FrameworkStatus,
-    fan_index: i32,
-    rpm: u32,
-) -> FrameworkEcSetFanRpmResult {
-    FrameworkEcSetFanRpmResult {
-        status,
-        fan_index,
-        rpm,
-    }
-}
-
-fn set_fan_duty_result(
-    status: FrameworkStatus,
-    fan_index: i32,
-    percent: u32,
-) -> FrameworkEcSetFanDutyResult {
-    FrameworkEcSetFanDutyResult {
-        status,
-        fan_index,
-        percent,
-    }
-}
-
-fn restore_auto_fan_control_result(
-    status: FrameworkStatus,
-    fan_index: i32,
-) -> FrameworkEcRestoreAutoFanControlResult {
-    FrameworkEcRestoreAutoFanControlResult { status, fan_index }
-}
-
-fn status_description(status: FrameworkStatus) -> String {
-    match status.code {
-        FrameworkStatusCode::Success => "Success".to_string(),
-        FrameworkStatusCode::NullPointer => "Null pointer".to_string(),
-        FrameworkStatusCode::InvalidArgument => {
-            format!(
-                "Invalid fan index: {}",
-                status.invalid_fan_index_value().unwrap_or_default()
-            )
-        }
-        FrameworkStatusCode::NoDriverAvailable => "No EC driver available".to_string(),
-        FrameworkStatusCode::UnsupportedDriver => {
-            "Requested EC driver is not supported on this system".to_string()
-        }
-        FrameworkStatusCode::DeviceError => {
-            if let Some(message) = status
-                .device_error_message_token()
-                .and_then(get_device_error_message)
-            {
-                format!("Device error: {}", message)
-            } else {
-                "Device error".to_string()
-            }
-        }
-        FrameworkStatusCode::EcResponse => {
-            let detail = status
-                .ec_response_detail()
-                .unwrap_or(FrameworkEcResponseDetail::Unknown);
-            format!(
-                "EC response: {} ({})",
-                ec_response_detail_name(detail),
-                detail as i32
-            )
-        }
-        FrameworkStatusCode::UnknownResponseCode => {
-            format!(
-                "Unknown EC response code: {}",
-                status.unknown_response_code_value().unwrap_or_default()
-            )
-        }
-        FrameworkStatusCode::DataUnavailable => "Data unavailable".to_string(),
-    }
-}
-
-fn status_from_error(error: EcError) -> FrameworkStatus {
-    match error {
-        EcError::Response(response) => {
-            FrameworkStatus::with(FrameworkStatusCode::EcResponse, response as i32)
-        }
-        EcError::UnknownResponseCode(code) => FrameworkStatus::with(
-            FrameworkStatusCode::UnknownResponseCode,
-            i32::try_from(code).unwrap_or(i32::MAX),
-        ),
-        EcError::DeviceError(message) => {
-            let detail = store_device_error_message(message);
-            FrameworkStatus::with(FrameworkStatusCode::DeviceError, detail)
-        }
-    }
-}
-
-fn default_ec_handle() -> Option<FrameworkEcHandle> {
-    #[cfg(windows)]
-    if let Some(ec) = CrosEc::with(CrosEcDriverType::Windows) {
-        return Some(FrameworkEcHandle {
-            ec,
-            driver: FrameworkEcDriver::Windows,
-        });
-    }
-
-    #[cfg(target_os = "linux")]
-    if std::path::Path::new(CROS_EC_DEV_PATH).exists() {
-        if let Some(ec) = CrosEc::with(CrosEcDriverType::CrosEc) {
-            return Some(FrameworkEcHandle {
-                ec,
-                driver: FrameworkEcDriver::CrosEc,
-            });
-        }
-    }
-
-    #[cfg(all(not(windows), target_arch = "x86_64"))]
-    if let Some(ec) = CrosEc::with(CrosEcDriverType::Portio) {
-        return Some(FrameworkEcHandle {
-            ec,
-            driver: FrameworkEcDriver::Portio,
-        });
-    }
-
-    None
-}
-
-fn read_feature_flags(ec: &CrosEc) -> Result<[u32; 2], FrameworkStatus> {
-    EcRequestGetFeatures {}
-        .send_command(ec)
-        .map(|response| response.flags)
-        .map_err(status_from_error)
-}
-
-fn feature_enabled(ec: &CrosEc, feature: EcFeatureCode) -> Result<bool, FrameworkStatus> {
-    let flags = read_feature_flags(ec)?;
-    let index = feature as usize;
-    let word = index / 32;
-    let bit = index % 32;
-    Ok((flags[word] & (1 << bit)) != 0)
-}
-
-fn require_handle<'a>(
-    handle: *const FrameworkEcHandle,
-) -> Result<&'a FrameworkEcHandle, FrameworkStatus> {
-    if handle.is_null() {
-        return Err(FrameworkStatus::with(FrameworkStatusCode::NullPointer, 0));
-    }
-
-    // SAFETY: the caller guarantees the handle pointer came from framework_ec_open_*.
-    Ok(unsafe { &*handle })
-}
-
-fn parse_optional_fan_index(fan_index: i32) -> Result<Option<u32>, FrameworkStatus> {
-    if fan_index == -1 {
-        return Ok(None);
-    }
-
-    let fan_index = u32::try_from(fan_index)
-        .map_err(|_| FrameworkStatus::with(FrameworkStatusCode::InvalidArgument, fan_index))?;
-    Ok(Some(fan_index))
-}
-
-fn parse_optional_fan_index_u8(fan_index: i32) -> Result<Option<u8>, FrameworkStatus> {
-    if fan_index == -1 {
-        return Ok(None);
-    }
-
-    let fan_index = u8::try_from(fan_index)
-        .map_err(|_| FrameworkStatus::with(FrameworkStatusCode::InvalidArgument, fan_index))?;
-    Ok(Some(fan_index))
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcModuleInventoryResult {
+    pub status: FrameworkStatus,
+    pub inventory: FrameworkModuleInventory,
 }
 
 #[no_mangle]
 pub extern "C" fn framework_ec_driver_is_supported(driver: FrameworkEcDriver) -> bool {
-    let Ok(driver) = CrosEcDriverType::try_from(driver) else {
-        return false;
-    };
-
-    CrosEc::with(driver).is_some()
+    runtime::driver_is_supported(driver)
 }
 
 #[no_mangle]
@@ -1238,46 +712,14 @@ pub extern "C" fn framework_status_get_description(
 
 #[no_mangle]
 pub extern "C" fn framework_ec_open_default() -> FrameworkEcHandleResult {
-    let Some(handle) = default_ec_handle() else {
-        return ec_handle_result(
-            FrameworkStatus::with(FrameworkStatusCode::NoDriverAvailable, 0),
-            ptr::null_mut(),
-        );
-    };
-
-    if let Err(error) = handle.ec.check_mem_magic() {
-        return ec_handle_result(status_from_error(error), ptr::null_mut());
-    }
-
-    ec_handle_result(FrameworkStatus::success(), Box::into_raw(Box::new(handle)))
+    runtime::open_default_ec()
 }
 
 #[no_mangle]
 pub extern "C" fn framework_ec_open_with_driver(
     driver: FrameworkEcDriver,
 ) -> FrameworkEcHandleResult {
-    let Ok(driver_type) = CrosEcDriverType::try_from(driver) else {
-        return ec_handle_result(
-            FrameworkStatus::with(FrameworkStatusCode::UnsupportedDriver, 0),
-            ptr::null_mut(),
-        );
-    };
-
-    let Some(ec) = CrosEc::with(driver_type) else {
-        return ec_handle_result(
-            FrameworkStatus::with(FrameworkStatusCode::UnsupportedDriver, 0),
-            ptr::null_mut(),
-        );
-    };
-
-    if let Err(error) = ec.check_mem_magic() {
-        return ec_handle_result(status_from_error(error), ptr::null_mut());
-    }
-
-    ec_handle_result(
-        FrameworkStatus::success(),
-        Box::into_raw(Box::new(FrameworkEcHandle { ec, driver })),
-    )
+    runtime::open_with_driver_ec(driver)
 }
 
 #[no_mangle]
@@ -1406,25 +848,28 @@ pub unsafe extern "C" fn framework_ec_get_power_snapshot(
 ) -> FrameworkEcPowerSnapshotResult {
     let handle = match require_handle(handle) {
         Ok(handle) => handle,
-        Err(status) => return power_snapshot_result(status, default_power_snapshot()),
+        Err(status) => return power_snapshot_result(status, thermal::default_power_snapshot()),
     };
 
     let Some(power_info) = power::power_info(&handle.ec) else {
         return power_snapshot_result(
             FrameworkStatus::with(FrameworkStatusCode::DataUnavailable, 0),
-            default_power_snapshot(),
+            thermal::default_power_snapshot(),
         );
     };
 
     let mut snapshot = FrameworkPowerSnapshot {
-        power_source_state: power_source_state(power_info.ac_present, power_info.battery.is_some()),
-        ..default_power_snapshot()
+        power_source_state: thermal::power_source_state(
+            power_info.ac_present,
+            power_info.battery.is_some(),
+        ),
+        ..thermal::default_power_snapshot()
     };
 
     if let Some(battery) = power_info.battery {
         snapshot.battery_count = battery.battery_count;
         snapshot.battery_0 = FrameworkBatterySnapshot {
-            battery_state: battery_state(
+            battery_state: thermal::battery_state(
                 battery.level_critical,
                 battery.discharging,
                 battery.charging,
@@ -1456,30 +901,13 @@ pub unsafe extern "C" fn framework_ec_get_fan_capabilities(
 ) -> FrameworkEcFanCapabilitiesResult {
     let handle = match require_handle(handle) {
         Ok(handle) => handle,
-        Err(status) => return fan_capabilities_result(status, default_fan_capabilities()),
+        Err(status) => return fan_capabilities_result(status, thermal::default_fan_capabilities()),
     };
 
-    let fan_control = match feature_enabled(&handle.ec, EcFeatureCode::PwmFan) {
-        Ok(supported) => supported,
-        Err(status) => return fan_capabilities_result(status, default_fan_capabilities()),
-    };
-    let thermal = match feature_enabled(&handle.ec, EcFeatureCode::Thermal) {
-        Ok(supported) => supported,
-        Err(status) => return fan_capabilities_result(status, default_fan_capabilities()),
-    };
-
-    let fan_count = thermal_snapshot(&handle.ec)
-        .map(|snapshot| snapshot.fan_count)
-        .unwrap_or(0);
-
-    fan_capabilities_result(
-        FrameworkStatus::success(),
-        FrameworkFanCapabilities {
-            fan_count,
-            features: fan_features_state(fan_control, thermal),
-            reserved: [0; 2],
-        },
-    )
+    match thermal::build_fan_capabilities(&handle.ec) {
+        Ok(capabilities) => fan_capabilities_result(FrameworkStatus::success(), capabilities),
+        Err(status) => fan_capabilities_result(status, thermal::default_fan_capabilities()),
+    }
 }
 
 #[no_mangle]
@@ -1490,66 +918,212 @@ pub unsafe extern "C" fn framework_ec_get_thermal_snapshot(
 ) -> FrameworkEcThermalSnapshotResult {
     let handle = match require_handle(handle) {
         Ok(handle) => handle,
-        Err(status) => return thermal_snapshot_result(status, default_thermal_snapshot()),
+        Err(status) => return thermal_snapshot_result(status, thermal::default_thermal_snapshot()),
     };
 
-    let Some(snapshot) = thermal_snapshot(&handle.ec) else {
+    let Some(snapshot) = thermal::build_thermal_snapshot(&handle.ec) else {
         return thermal_snapshot_result(
             FrameworkStatus::with(FrameworkStatusCode::DataUnavailable, 0),
-            default_thermal_snapshot(),
+            thermal::default_thermal_snapshot(),
         );
     };
 
-    let mut temperatures = [default_temperature_reading(); THERMAL_SENSOR_COUNT];
-    for (index, reading) in snapshot.temperatures.iter().enumerate() {
-        temperatures[index] = FrameworkTemperatureReading {
-            state: reading.status.into(),
-            celsius: reading.celsius,
-            reserved: 0,
-        };
-    }
+    thermal_snapshot_result(FrameworkStatus::success(), snapshot)
+}
 
-    let mut fan_present = [0u8; FAN_SLOT_COUNT];
-    let mut fan_stalled = [0u8; FAN_SLOT_COUNT];
-    for index in 0..FAN_SLOT_COUNT {
-        fan_present[index] = u8::from(snapshot.fan_present[index]);
-        fan_stalled[index] = u8::from(snapshot.fan_stalled[index]);
-    }
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_feature_flags(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcFeatureFlagsResult {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => {
+            let mut result = inventory::default_feature_flags_result();
+            result.status = status;
+            return result;
+        }
+    };
 
-    thermal_snapshot_result(
+    match inventory::feature_flags(&handle.ec) {
+        Ok(flags) => inventory::feature_flags_result(FrameworkStatus::success(), flags),
+        Err(status) => inventory::feature_flags_result(status, 0),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_keyboard_backlight(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcKeyboardBacklightResult {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => {
+            let mut result = inventory::default_keyboard_backlight_result();
+            result.status = status;
+            return result;
+        }
+    };
+
+    match handle.ec.get_keyboard_backlight() {
+        Ok(level) => inventory::keyboard_backlight_result(FrameworkStatus::success(), level),
+        Err(error) => inventory::keyboard_backlight_result(status_from_error(error), 0),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_fingerprint_led(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcFingerprintLedResult {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => {
+            let mut result = inventory::default_fingerprint_led_result();
+            result.status = status;
+            return result;
+        }
+    };
+
+    match handle.ec.get_fp_led_level() {
+        Ok((raw_level, level)) => inventory::fingerprint_led_result(
+            FrameworkStatus::success(),
+            raw_level,
+            inventory::fingerprint_led_level(level),
+        ),
+        Err(error) => inventory::fingerprint_led_result(
+            status_from_error(error),
+            0,
+            FrameworkFingerprintLedLevel::Unknown,
+        ),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_expansion_bay_status(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcExpansionBayStatusResult {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => {
+            let mut result = inventory::default_expansion_bay_status_result();
+            result.status = status;
+            return result;
+        }
+    };
+
+    match inventory::expansion_bay_status(&handle.ec) {
+        Ok(bay) => inventory::expansion_bay_status_result(FrameworkStatus::success(), bay),
+        Err(status) => inventory::expansion_bay_status_result(
+            status,
+            inventory::default_expansion_bay_status(),
+        ),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_gpu_descriptor_header(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcGpuDescriptorHeaderResult {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => {
+            let mut result = gpu_descriptor::default_header_result();
+            result.status = status;
+            return result;
+        }
+    };
+
+    match gpu_descriptor::read_header(handle) {
+        Ok(header) => gpu_descriptor_header_result(FrameworkStatus::success(), header),
+        Err(status) => gpu_descriptor_header_result(status, gpu_descriptor::default_header()),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library. The returned
+/// `descriptor` buffer must be released with `framework_byte_buffer_free`.
+pub unsafe extern "C" fn framework_ec_read_gpu_descriptor(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcGpuDescriptorReadResult {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => {
+            let mut result = gpu_descriptor::default_read_result();
+            result.status = status;
+            return result;
+        }
+    };
+
+    match gpu_descriptor::read_raw_descriptor(handle) {
+        Ok(descriptor) => gpu_descriptor_read_result(FrameworkStatus::success(), descriptor),
+        Err(status) => gpu_descriptor_read_result(status, FrameworkByteBuffer::default()),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+/// `expected_descriptor_ptr` must be valid for `expected_descriptor_length`
+/// bytes when `expected_descriptor_length` is greater than 0.
+pub unsafe extern "C" fn framework_ec_validate_gpu_descriptor(
+    handle: *const FrameworkEcHandle,
+    expected_descriptor_ptr: *const u8,
+    expected_descriptor_length: u32,
+) -> FrameworkEcGpuDescriptorValidationResult {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => {
+            let mut result = gpu_descriptor::default_validation_result();
+            result.status = status;
+            return result;
+        }
+    };
+
+    let expected_descriptor = match gpu_descriptor::validate_expected_bytes(
+        expected_descriptor_ptr,
+        expected_descriptor_length,
+    ) {
+        Ok(expected_descriptor) => expected_descriptor,
+        Err(status) => {
+            let mut result = gpu_descriptor::default_validation_result();
+            result.status = status;
+            return result;
+        }
+    };
+
+    match gpu_descriptor::validate(handle, expected_descriptor) {
+        Ok(is_match) => gpu_descriptor_validation_result(FrameworkStatus::success(), is_match),
+        Err(status) => gpu_descriptor_validation_result(status, false),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_module_inventory(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcModuleInventoryResult {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => {
+            let mut result = inventory::default_module_inventory_result();
+            result.status = status;
+            return result;
+        }
+    };
+
+    inventory::module_inventory_result(
         FrameworkStatus::success(),
-        FrameworkThermalSnapshot {
-            fan_count: snapshot.fan_count,
-            reserved: [0; 3],
-            temperature_0: temperatures[0],
-            temperature_1: temperatures[1],
-            temperature_2: temperatures[2],
-            temperature_3: temperatures[3],
-            temperature_4: temperatures[4],
-            temperature_5: temperatures[5],
-            temperature_6: temperatures[6],
-            temperature_7: temperatures[7],
-            fan_0: FrameworkFanReading {
-                state: fan_state(snapshot.fan_present[0], snapshot.fan_stalled[0]),
-                rpm: snapshot.fan_rpms[0],
-                reserved: 0,
-            },
-            fan_1: FrameworkFanReading {
-                state: fan_state(snapshot.fan_present[1], snapshot.fan_stalled[1]),
-                rpm: snapshot.fan_rpms[1],
-                reserved: 0,
-            },
-            fan_2: FrameworkFanReading {
-                state: fan_state(snapshot.fan_present[2], snapshot.fan_stalled[2]),
-                rpm: snapshot.fan_rpms[2],
-                reserved: 0,
-            },
-            fan_3: FrameworkFanReading {
-                state: fan_state(snapshot.fan_present[3], snapshot.fan_stalled[3]),
-                rpm: snapshot.fan_rpms[3],
-                reserved: 0,
-            },
-        },
+        inventory::build_module_inventory(handle),
     )
 }
 

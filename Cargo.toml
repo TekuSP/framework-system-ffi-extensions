@@ -15,5 +15,7 @@ csbindgen = "1.9.7"
 
 [dependencies]
 framework_lib = { path = "framework-system/framework_lib" }
+hidapi = { version = "2.6.3", features = ["windows-native"] }
+rusb = "0.9.4"
 
 [workspace]
