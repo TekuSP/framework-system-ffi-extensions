@@ -1,9 +1,9 @@
 [package]
 name = "framework_lib_ffi"
-version = "0.6.3"
+version = "0.3.0"
 description = "Standalone native FFI surface for Framework System .NET interop"
-license = "BSD-3-Clause"
-edition = "2021"
+license = "MIT License"
+edition = "2026"
 rust-version = "1.81"
 build = "build.rs"
 
