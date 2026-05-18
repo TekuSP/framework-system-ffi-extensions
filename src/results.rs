@@ -70,6 +70,31 @@ pub(crate) fn active_driver_result(
     FrameworkEcActiveDriverResult { status, driver }
 }
 
+pub(crate) fn gpu_descriptor_header_result(
+    status: FrameworkStatus,
+    header: FrameworkGpuDescriptorHeader,
+) -> FrameworkEcGpuDescriptorHeaderResult {
+    FrameworkEcGpuDescriptorHeaderResult { status, header }
+}
+
+pub(crate) fn gpu_descriptor_read_result(
+    status: FrameworkStatus,
+    descriptor: FrameworkByteBuffer,
+) -> FrameworkEcGpuDescriptorReadResult {
+    FrameworkEcGpuDescriptorReadResult { status, descriptor }
+}
+
+pub(crate) fn gpu_descriptor_validation_result(
+    status: FrameworkStatus,
+    is_match: bool,
+) -> FrameworkEcGpuDescriptorValidationResult {
+    FrameworkEcGpuDescriptorValidationResult {
+        status,
+        is_match: u8::from(is_match),
+        reserved: [0; 3],
+    }
+}
+
 pub(crate) fn status_device_error_message_result(
     status: FrameworkStatus,
     message: FrameworkByteBuffer,

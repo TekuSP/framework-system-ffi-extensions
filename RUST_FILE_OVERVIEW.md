@@ -27,6 +27,7 @@ The crate is split into two layers:
 | `src/lib.rs` | Main FFI surface. Defines the public native ABI types and exports the C-callable entry points consumed by C# and other native callers. |
 | `src/abi_impls.rs` | Conversion glue between upstream `framework_lib` Rust enums/types and the FFI enums exposed by this crate, such as EC driver, platform, platform family, and current EC image. |
 | `src/byte_buffer.rs` | Owns `FrameworkByteBuffer` memory helpers: creating buffers from `Vec<u8>` and safely freeing them later across the FFI boundary. |
+| `src/gpu_descriptor.rs` | Read-only helper logic for the Framework 16 expansion-bay GPU descriptor surface. Maps upstream descriptor headers into FFI structs, reads raw descriptor bytes, validates them against caller-provided bytes, and returns stable default payloads on failure. |
 | `src/results.rs` | Small constructors for the various `*_Result` structs and a few default result payloads. Keeps repetitive result assembly out of `lib.rs`. |
 | `src/runtime.rs` | Runtime/handle helpers: open the EC with the default or requested driver, validate incoming handle pointers, read feature flags, and parse optional fan indexes. |
 | `src/status.rs` | Status plumbing. Builds `FrameworkStatus` values, maps EC errors to FFI status codes, stores device error strings behind integer tokens, and formats human-readable status descriptions. |
@@ -54,6 +55,7 @@ If you want to change something, this is usually the right file:
 - **Adjust status codes or error descriptions** → `src/status.rs`
 - **Adjust EC open/driver selection logic** → `src/runtime.rs`
 - **Adjust FFI byte buffer ownership** → `src/byte_buffer.rs`
+- **Adjust GPU descriptor header/raw/validation logic** → `src/gpu_descriptor.rs`
 - **Adjust thermal/fan/power snapshots** → `src/thermal.rs`
 - **Adjust module inventory composition** → `src/inventory/builder.rs`
 - **Add a new inventory detector** → `src/inventory/detect.rs` or `src/inventory/internals.rs`

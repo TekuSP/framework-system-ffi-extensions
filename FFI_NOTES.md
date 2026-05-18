@@ -23,6 +23,9 @@ control layer:
 - keyboard backlight readback
 - fingerprint LED readback
 - expansion bay status snapshot
+- GPU descriptor header readback
+- raw GPU descriptor readback
+- GPU descriptor validation against caller-provided full descriptor bytes
 - unified module inventory snapshot with best-effort detection for USB-C cards,
   Framework 16 input modules, touchpad, fingerprint reader, touchscreen, webcam,
   and expansion bay presence
@@ -74,6 +77,7 @@ Compared with the full `framework-system` repo and CLI, the major missing areas 
 
 - ESRT access
 - firmware version surfaces beyond the currently exposed subset
+- GPU descriptor writing / flashing
 - EC and PD binary parsing
 - capsule parsing
 - EC reboot and image-jump controls
@@ -118,6 +122,9 @@ the highest-value additions are likely:
   values in C# rather than named flag enums, so the managed side should keep named
   constants/helpers for `FrameworkEcFeatureFlagsResult.flags` and
   `FrameworkModuleDescriptor.flags`.
+- Fixed-size byte arrays generate as C# `fixed byte[...]` buffers, which works well
+  for truly binary fixed-layout metadata such as GPU descriptor `magic` and `serial`
+  fields but is still a poor fit for general-purpose strings.
 
 ### Strings and Ownership
 
@@ -125,8 +132,8 @@ the highest-value additions are likely:
   when the managed side needs to treat the data as strings.
 - Every returned `FrameworkByteBuffer` must be freed with `framework_byte_buffer_free`
   after its contents have been copied.
-- This applies to nested buffers too, such as battery text fields and flash version
-  strings.
+- This applies to nested buffers too, such as battery text fields, flash version
+  strings, and raw GPU descriptor blobs.
 
 ### Status and Error Reporting
 

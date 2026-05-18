@@ -4,6 +4,7 @@ use framework_lib::smbios;
 
 mod abi_impls;
 mod byte_buffer;
+mod gpu_descriptor;
 mod inventory;
 mod results;
 mod runtime;
@@ -12,9 +13,11 @@ mod thermal;
 
 use results::{
     active_driver_result, build_info_result, default_ec_flash_versions, fan_capabilities_result,
-    flash_versions_result, platform_family_result, platform_result, power_snapshot_result,
-    product_name_result, restore_auto_fan_control_result, set_fan_duty_result, set_fan_rpm_result,
-    status_description_result, status_device_error_message_result, thermal_snapshot_result,
+    flash_versions_result, gpu_descriptor_header_result, gpu_descriptor_read_result,
+    gpu_descriptor_validation_result, platform_family_result, platform_result,
+    power_snapshot_result, product_name_result, restore_auto_fan_control_result,
+    set_fan_duty_result, set_fan_rpm_result, status_description_result,
+    status_device_error_message_result, thermal_snapshot_result,
 };
 use runtime::{parse_optional_fan_index, parse_optional_fan_index_u8, require_handle};
 use status::{get_device_error_message, status_description};
@@ -579,6 +582,43 @@ pub struct FrameworkEcExpansionBayStatusResult {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameworkGpuDescriptorHeader {
+    pub magic: [u8; 4],
+    pub length: u32,
+    pub desc_ver_major: u16,
+    pub desc_ver_minor: u16,
+    pub hardware_version: u16,
+    pub hardware_revision: u16,
+    pub serial: [u8; 20],
+    pub descriptor_length: u32,
+    pub descriptor_crc32: u32,
+    pub crc32: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcGpuDescriptorHeaderResult {
+    pub status: FrameworkStatus,
+    pub header: FrameworkGpuDescriptorHeader,
+}
+
+#[repr(C)]
+#[derive(Clone)]
+pub struct FrameworkEcGpuDescriptorReadResult {
+    pub status: FrameworkStatus,
+    pub descriptor: FrameworkByteBuffer,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcGpuDescriptorValidationResult {
+    pub status: FrameworkStatus,
+    pub is_match: u8,
+    pub reserved: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameworkModuleDescriptor {
     pub identity: FrameworkModuleIdentity,
     pub bus: FrameworkModuleBus,
@@ -983,6 +1023,86 @@ pub unsafe extern "C" fn framework_ec_get_expansion_bay_status(
             status,
             inventory::default_expansion_bay_status(),
         ),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_gpu_descriptor_header(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcGpuDescriptorHeaderResult {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => {
+            let mut result = gpu_descriptor::default_header_result();
+            result.status = status;
+            return result;
+        }
+    };
+
+    match gpu_descriptor::read_header(handle) {
+        Ok(header) => gpu_descriptor_header_result(FrameworkStatus::success(), header),
+        Err(status) => gpu_descriptor_header_result(status, gpu_descriptor::default_header()),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library. The returned
+/// `descriptor` buffer must be released with `framework_byte_buffer_free`.
+pub unsafe extern "C" fn framework_ec_read_gpu_descriptor(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcGpuDescriptorReadResult {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => {
+            let mut result = gpu_descriptor::default_read_result();
+            result.status = status;
+            return result;
+        }
+    };
+
+    match gpu_descriptor::read_raw_descriptor(handle) {
+        Ok(descriptor) => gpu_descriptor_read_result(FrameworkStatus::success(), descriptor),
+        Err(status) => gpu_descriptor_read_result(status, FrameworkByteBuffer::default()),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+/// `expected_descriptor_ptr` must be valid for `expected_descriptor_length`
+/// bytes when `expected_descriptor_length` is greater than 0.
+pub unsafe extern "C" fn framework_ec_validate_gpu_descriptor(
+    handle: *const FrameworkEcHandle,
+    expected_descriptor_ptr: *const u8,
+    expected_descriptor_length: u32,
+) -> FrameworkEcGpuDescriptorValidationResult {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => {
+            let mut result = gpu_descriptor::default_validation_result();
+            result.status = status;
+            return result;
+        }
+    };
+
+    let expected_descriptor = match gpu_descriptor::validate_expected_bytes(
+        expected_descriptor_ptr,
+        expected_descriptor_length,
+    ) {
+        Ok(expected_descriptor) => expected_descriptor,
+        Err(status) => {
+            let mut result = gpu_descriptor::default_validation_result();
+            result.status = status;
+            return result;
+        }
+    };
+
+    match gpu_descriptor::validate(handle, expected_descriptor) {
+        Ok(is_match) => gpu_descriptor_validation_result(FrameworkStatus::success(), is_match),
+        Err(status) => gpu_descriptor_validation_result(status, false),
     }
 }
 
