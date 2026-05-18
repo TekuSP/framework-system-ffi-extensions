@@ -3,7 +3,7 @@ name = "framework_lib_ffi"
 version = "0.3.0"
 description = "Standalone native FFI surface for Framework System .NET interop"
 license = "MIT License"
-edition = "2024"
+edition = "2021"
 rust-version = "1.81"
 build = "build.rs"
 
