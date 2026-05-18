@@ -19,7 +19,19 @@ control layer:
 - fan RPM control
 - fan duty control
 - restore automatic fan control
+- compact EC feature flags for common presence/control checks
+- keyboard backlight readback
+- fingerprint LED readback
+- expansion bay status snapshot
+- unified module inventory snapshot with best-effort detection for USB-C cards,
+  Framework 16 input modules, touchpad, fingerprint reader, touchscreen, webcam,
+  and expansion bay presence
 - structured status and device error reporting
+
+The current FFI still does **not** expose an implemented EC fan-table or max-fan-RPM
+reader. The repo currently reads live fan RPM and can set a target RPM/duty, but the
+"limited by EC fan table max RPM" behavior remains firmware-enforced rather than a
+separate readable FFI value.
 
 ## Missing Features
 
@@ -51,12 +63,11 @@ Compared with the full `framework-system` repo and CLI, the major missing areas 
 
 ### Device and Platform Controls
 
-- keyboard backlight control
-- fingerprint LED control
+- broader keyboard backlight control surface
+- fingerprint LED write/control surface
 - tablet mode override
 - touchscreen enable/disable
-- input deck status and mode
-- expansion bay status
+- input deck mode control
 - NVIDIA-related status on supported systems
 
 ### Firmware and Binary Tooling
@@ -70,8 +81,8 @@ Compared with the full `framework-system` repo and CLI, the major missing areas 
 
 ### Expansion Card and Peripheral Support
 
-- DisplayPort and HDMI expansion card info and update flows
-- audio card info
+- richer DisplayPort and HDMI expansion card details and update flows
+- richer audio card info
 - retimer and other peripheral-oriented surfaces
 
 ### Raw and Advanced Escape Hatches
@@ -103,6 +114,10 @@ the highest-value additions are likely:
   without turning every API into a special case.
 - Nested structs and enums generate much better interop shapes than flat flags and
   unrelated primitive fields.
+- Bitmask-style capability fields currently generate as primitive `ulong` / `uint`
+  values in C# rather than named flag enums, so the managed side should keep named
+  constants/helpers for `FrameworkEcFeatureFlagsResult.flags` and
+  `FrameworkModuleDescriptor.flags`.
 
 ### Strings and Ownership
 

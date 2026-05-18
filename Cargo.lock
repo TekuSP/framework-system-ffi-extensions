@@ -410,6 +410,8 @@ version = "0.6.3"
 dependencies = [
  "csbindgen",
  "framework_lib",
+ "hidapi",
+ "rusb",
 ]
 
 [[package]]

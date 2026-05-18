@@ -27,7 +27,9 @@ should be reviewed explicitly rather than treated as internal-only refactors.
 
 ## Pending Changes
 
-No downstream follow-up is currently recorded.
+| Date | FFI change | Affected downstream area | Required framework-dotnet changes | Status |
+| --- | --- | --- | --- | --- |
+| 2026-05-18 | Added `framework_ec_get_feature_flags`, `framework_ec_get_keyboard_backlight`, `framework_ec_get_fingerprint_led`, `framework_ec_get_expansion_bay_status`, and `framework_ec_get_module_inventory` plus new module/inventory enums and records | Native method generation, managed wrappers, module inventory domain model, `FrameworkByteBuffer` handling for expansion-bay serial number | Regenerate/update interop bindings, add managed constants/helpers for the feature/module flag bitmasks, map `FrameworkEcExpansionBayStatus.serial_number` through existing byte-buffer free helpers, add wrapper/domain types for module inventory slots/descriptors, and wire the new raw readback APIs into managed services/UI | Planned |
 
 When needed, add entries in this format:
 

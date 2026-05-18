@@ -4,18 +4,30 @@ use std::ptr;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use framework_lib::chromium_ec::command::EcRequestRaw;
-use framework_lib::chromium_ec::commands::{EcFeatureCode, EcRequestGetFeatures};
-use framework_lib::chromium_ec::{
-    CrosEc, CrosEcDriver, CrosEcDriverType, EcCurrentImage, EcError, EcResponseStatus,
+use framework_lib::audio_card;
+use framework_lib::camera;
+use framework_lib::ccgx::hid;
+use framework_lib::chromium_ec::commands::{
+    BoardIdType, EcFeatureCode, EcRequestExpansionBayStatus, EcRequestGetFeatures,
+    EcRequestGetGpuPcie, EcRequestGetPdPortState, ExpansionBayBoard, ExpansionBayIssue,
+    FpLedBrightnessLevel, GpuPcieConfig, GpuVendor,
 };
+use framework_lib::chromium_ec::input_deck::InputModuleType;
+use framework_lib::chromium_ec::{
+    CrosEc, CrosEcDriver, CrosEcDriverType, EcCurrentImage, EcError, EcRequestRaw, EcResponseStatus,
+};
+use framework_lib::inputmodule;
 use framework_lib::power;
 use framework_lib::smbios;
 use framework_lib::smbios::{Platform, PlatformFamily};
+use framework_lib::touchpad;
+use framework_lib::touchscreen;
+use hidapi::HidApi;
 
 const STORED_DEVICE_ERROR_LIMIT: usize = 64;
 #[cfg(target_os = "linux")]
 const CROS_EC_DEV_PATH: &str = "/dev/cros_ec";
+const MAX_USB_C_SLOT_COUNT: usize = 6;
 const THERMAL_SENSOR_COUNT: usize = 8;
 const FAN_SLOT_COUNT: usize = 4;
 const EC_MEMMAP_TEMP_SENSOR: u16 = 0x00;
@@ -734,6 +746,240 @@ pub struct FrameworkEcRestoreAutoFanControlResult {
     pub fan_index: i32,
 }
 
+#[repr(u64)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkEcFeatureFlag {
+    None = 0,
+    Keyboard = 1 << 0,
+    KeyboardBacklight = 1 << 1,
+    Touchpad = 1 << 2,
+    Fingerprint = 1 << 3,
+    AmbientLight = 1 << 4,
+    TabletMode = 1 << 5,
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkFingerprintLedLevel {
+    Unknown = -1,
+    High = 0,
+    Medium = 1,
+    Low = 2,
+    UltraLow = 3,
+    Custom = 0xFE,
+    Auto = 0xFF,
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkExpansionBayBoard {
+    Unknown = 0,
+    DualInterposer = 1,
+    SingleInterposer = 2,
+    UmaFans = 3,
+    NoModule = 4,
+    BadConnection = 5,
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkExpansionBayVendor {
+    Unknown = 0,
+    Initializing = 1,
+    FanOnly = 2,
+    SsdHolder = 3,
+    PcieAccessory = 4,
+    AmdGpu = 5,
+    NvidiaGpu = 6,
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkGpuPcieConfig {
+    Unknown = 0,
+    Pcie4x1 = 1,
+    Pcie4x2 = 2,
+    Pcie4x4 = 3,
+    Pcie5x4 = 4,
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkModuleIdentity {
+    None = 0,
+    UnknownUsbCOccupant = 1,
+    DpExpansionCard = 2,
+    HdmiExpansionCard = 3,
+    AudioExpansionCard = 4,
+    Framework16KeyboardModule = 5,
+    Framework16LedMatrix = 6,
+    Framework16TouchpadModule = 7,
+    InternalKeyboard = 8,
+    InternalTouchpad = 9,
+    FingerprintReader = 10,
+    Touchscreen = 11,
+    Webcam = 12,
+    ExpansionBay = 13,
+    ExpansionBayDualInterposer = 14,
+    ExpansionBaySingleInterposer = 15,
+    ExpansionBayUmaFans = 16,
+    ExpansionBaySsdHolder = 17,
+    ExpansionBayPcieAccessory = 18,
+    ExpansionBayAmdGpu = 19,
+    ExpansionBayNvidiaGpu = 20,
+    ExpansionBayFanOnly = 21,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkModuleBus {
+    Unknown = 0,
+    Ec = 1,
+    Usb = 2,
+    Hid = 3,
+    Composite = 4,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkModuleSlotKind {
+    None = 0,
+    UsbCPort = 1,
+    InputDeckTopRow = 2,
+    InputDeckTouchpad = 3,
+    ExpansionBay = 4,
+    InternalFixed = 5,
+    Detached = 6,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkModuleConfidence {
+    Unknown = 0,
+    DerivedWeak = 1,
+    DerivedStrong = 2,
+    Direct = 3,
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkModuleFlag {
+    BuiltIn = 1 << 0,
+    Active = 1 << 1,
+    Connected = 1 << 2,
+    Fault = 1 << 3,
+    Ambiguous = 1 << 4,
+    HasPdContract = 1 << 5,
+    DisplayAltMode = 1 << 6,
+    DoorClosed = 1 << 7,
+    Enabled = 1 << 8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcFeatureFlagsResult {
+    pub status: FrameworkStatus,
+    pub flags: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcKeyboardBacklightResult {
+    pub status: FrameworkStatus,
+    pub brightness_percent: u8,
+    pub reserved: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameworkEcFingerprintLedState {
+    pub raw_level: u8,
+    pub reserved: [u8; 3],
+    pub level: FrameworkFingerprintLedLevel,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcFingerprintLedResult {
+    pub status: FrameworkStatus,
+    pub state: FrameworkEcFingerprintLedState,
+}
+
+#[repr(C)]
+#[derive(Clone)]
+pub struct FrameworkEcExpansionBayStatus {
+    pub present: u8,
+    pub enabled: u8,
+    pub fault: u8,
+    pub door_closed: u8,
+    pub board: FrameworkExpansionBayBoard,
+    pub vendor: FrameworkExpansionBayVendor,
+    pub config: FrameworkGpuPcieConfig,
+    pub reserved: [u8; 3],
+    pub serial_number: FrameworkByteBuffer,
+}
+
+#[repr(C)]
+#[derive(Clone)]
+pub struct FrameworkEcExpansionBayStatusResult {
+    pub status: FrameworkStatus,
+    pub bay: FrameworkEcExpansionBayStatus,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameworkModuleDescriptor {
+    pub identity: FrameworkModuleIdentity,
+    pub bus: FrameworkModuleBus,
+    pub slot_kind: FrameworkModuleSlotKind,
+    pub confidence: FrameworkModuleConfidence,
+    pub present: u8,
+    pub reserved_0: [u8; 3],
+    pub slot_index: i32,
+    pub flags: u32,
+    pub vendor_id: u32,
+    pub product_id: u32,
+    pub board_id: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameworkModuleInventory {
+    pub usb_c_slot_count: u8,
+    pub input_top_row_count: u8,
+    pub detached_count: u8,
+    pub reserved_0: u8,
+    pub usb_c_slot_0: FrameworkModuleDescriptor,
+    pub usb_c_slot_1: FrameworkModuleDescriptor,
+    pub usb_c_slot_2: FrameworkModuleDescriptor,
+    pub usb_c_slot_3: FrameworkModuleDescriptor,
+    pub usb_c_slot_4: FrameworkModuleDescriptor,
+    pub usb_c_slot_5: FrameworkModuleDescriptor,
+    pub input_top_row_0: FrameworkModuleDescriptor,
+    pub input_top_row_1: FrameworkModuleDescriptor,
+    pub input_top_row_2: FrameworkModuleDescriptor,
+    pub input_top_row_3: FrameworkModuleDescriptor,
+    pub input_top_row_4: FrameworkModuleDescriptor,
+    pub input_touchpad: FrameworkModuleDescriptor,
+    pub internal_keyboard: FrameworkModuleDescriptor,
+    pub internal_touchpad: FrameworkModuleDescriptor,
+    pub fingerprint_reader: FrameworkModuleDescriptor,
+    pub touchscreen: FrameworkModuleDescriptor,
+    pub webcam: FrameworkModuleDescriptor,
+    pub expansion_bay: FrameworkModuleDescriptor,
+    pub detached_0: FrameworkModuleDescriptor,
+    pub detached_1: FrameworkModuleDescriptor,
+    pub detached_2: FrameworkModuleDescriptor,
+    pub detached_3: FrameworkModuleDescriptor,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcModuleInventoryResult {
+    pub status: FrameworkStatus,
+    pub inventory: FrameworkModuleInventory,
+}
+
 fn device_error_messages() -> &'static Mutex<VecDeque<(i32, String)>> {
     DEVICE_ERROR_MESSAGES.get_or_init(|| Mutex::new(VecDeque::new()))
 }
@@ -848,6 +1094,1021 @@ fn default_fan_capabilities() -> FrameworkFanCapabilities {
         fan_count: 0,
         features: FrameworkFanFeaturesState::None,
         reserved: [0; 2],
+    }
+}
+
+fn default_feature_flags_result() -> FrameworkEcFeatureFlagsResult {
+    FrameworkEcFeatureFlagsResult {
+        status: FrameworkStatus::success(),
+        flags: 0,
+    }
+}
+
+fn default_keyboard_backlight_result() -> FrameworkEcKeyboardBacklightResult {
+    FrameworkEcKeyboardBacklightResult {
+        status: FrameworkStatus::success(),
+        brightness_percent: 0,
+        reserved: [0; 3],
+    }
+}
+
+fn default_fingerprint_led_state() -> FrameworkEcFingerprintLedState {
+    FrameworkEcFingerprintLedState {
+        raw_level: 0,
+        reserved: [0; 3],
+        level: FrameworkFingerprintLedLevel::Unknown,
+    }
+}
+
+fn default_fingerprint_led_result() -> FrameworkEcFingerprintLedResult {
+    FrameworkEcFingerprintLedResult {
+        status: FrameworkStatus::success(),
+        state: default_fingerprint_led_state(),
+    }
+}
+
+fn default_expansion_bay_status() -> FrameworkEcExpansionBayStatus {
+    FrameworkEcExpansionBayStatus {
+        present: 0,
+        enabled: 0,
+        fault: 0,
+        door_closed: 0,
+        board: FrameworkExpansionBayBoard::Unknown,
+        vendor: FrameworkExpansionBayVendor::Unknown,
+        config: FrameworkGpuPcieConfig::Unknown,
+        reserved: [0; 3],
+        serial_number: FrameworkByteBuffer::default(),
+    }
+}
+
+fn default_expansion_bay_status_result() -> FrameworkEcExpansionBayStatusResult {
+    FrameworkEcExpansionBayStatusResult {
+        status: FrameworkStatus::success(),
+        bay: default_expansion_bay_status(),
+    }
+}
+
+fn default_module_descriptor() -> FrameworkModuleDescriptor {
+    FrameworkModuleDescriptor {
+        identity: FrameworkModuleIdentity::None,
+        bus: FrameworkModuleBus::Unknown,
+        slot_kind: FrameworkModuleSlotKind::None,
+        confidence: FrameworkModuleConfidence::Unknown,
+        present: 0,
+        reserved_0: [0; 3],
+        slot_index: -1,
+        flags: 0,
+        vendor_id: 0,
+        product_id: 0,
+        board_id: -1,
+    }
+}
+
+fn default_module_inventory() -> FrameworkModuleInventory {
+    let none = default_module_descriptor();
+    FrameworkModuleInventory {
+        usb_c_slot_count: 0,
+        input_top_row_count: 0,
+        detached_count: 0,
+        reserved_0: 0,
+        usb_c_slot_0: none,
+        usb_c_slot_1: none,
+        usb_c_slot_2: none,
+        usb_c_slot_3: none,
+        usb_c_slot_4: none,
+        usb_c_slot_5: none,
+        input_top_row_0: none,
+        input_top_row_1: none,
+        input_top_row_2: none,
+        input_top_row_3: none,
+        input_top_row_4: none,
+        input_touchpad: none,
+        internal_keyboard: none,
+        internal_touchpad: none,
+        fingerprint_reader: none,
+        touchscreen: none,
+        webcam: none,
+        expansion_bay: none,
+        detached_0: none,
+        detached_1: none,
+        detached_2: none,
+        detached_3: none,
+    }
+}
+
+fn default_module_inventory_result() -> FrameworkEcModuleInventoryResult {
+    FrameworkEcModuleInventoryResult {
+        status: FrameworkStatus::success(),
+        inventory: default_module_inventory(),
+    }
+}
+
+fn module_flag(flag: FrameworkModuleFlag) -> u32 {
+    flag as u32
+}
+
+fn framework_feature_flag(flag: FrameworkEcFeatureFlag) -> u64 {
+    flag as u64
+}
+
+fn fingerprint_led_level(level: Option<FpLedBrightnessLevel>) -> FrameworkFingerprintLedLevel {
+    match level {
+        Some(FpLedBrightnessLevel::High) => FrameworkFingerprintLedLevel::High,
+        Some(FpLedBrightnessLevel::Medium) => FrameworkFingerprintLedLevel::Medium,
+        Some(FpLedBrightnessLevel::Low) => FrameworkFingerprintLedLevel::Low,
+        Some(FpLedBrightnessLevel::UltraLow) => FrameworkFingerprintLedLevel::UltraLow,
+        Some(FpLedBrightnessLevel::Custom) => FrameworkFingerprintLedLevel::Custom,
+        Some(FpLedBrightnessLevel::Auto) => FrameworkFingerprintLedLevel::Auto,
+        None => FrameworkFingerprintLedLevel::Unknown,
+    }
+}
+
+fn expansion_bay_board(
+    board: Result<ExpansionBayBoard, ExpansionBayIssue>,
+) -> FrameworkExpansionBayBoard {
+    match board {
+        Ok(ExpansionBayBoard::DualInterposer) => FrameworkExpansionBayBoard::DualInterposer,
+        Ok(ExpansionBayBoard::SingleInterposer) => FrameworkExpansionBayBoard::SingleInterposer,
+        Ok(ExpansionBayBoard::UmaFans) => FrameworkExpansionBayBoard::UmaFans,
+        Err(ExpansionBayIssue::NoModule) => FrameworkExpansionBayBoard::NoModule,
+        Err(ExpansionBayIssue::BadConnection(_, _)) => FrameworkExpansionBayBoard::BadConnection,
+    }
+}
+
+fn expansion_bay_vendor(vendor: Option<GpuVendor>) -> FrameworkExpansionBayVendor {
+    match vendor {
+        Some(GpuVendor::Initializing) => FrameworkExpansionBayVendor::Initializing,
+        Some(GpuVendor::FanOnly) => FrameworkExpansionBayVendor::FanOnly,
+        Some(GpuVendor::GpuAmdR23M) => FrameworkExpansionBayVendor::AmdGpu,
+        Some(GpuVendor::SsdHolder) => FrameworkExpansionBayVendor::SsdHolder,
+        Some(GpuVendor::PcieAccessory) => FrameworkExpansionBayVendor::PcieAccessory,
+        Some(GpuVendor::NvidiaGn22) => FrameworkExpansionBayVendor::NvidiaGpu,
+        None => FrameworkExpansionBayVendor::Unknown,
+    }
+}
+
+fn gpu_pcie_config(config: Option<GpuPcieConfig>) -> FrameworkGpuPcieConfig {
+    match config {
+        Some(GpuPcieConfig::Pcie8x1) => FrameworkGpuPcieConfig::Unknown,
+        Some(GpuPcieConfig::Pcie4x1) => FrameworkGpuPcieConfig::Pcie4x1,
+        Some(GpuPcieConfig::Pcie4x2) => FrameworkGpuPcieConfig::Pcie4x2,
+        None => FrameworkGpuPcieConfig::Unknown,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn module_descriptor(
+    identity: FrameworkModuleIdentity,
+    bus: FrameworkModuleBus,
+    slot_kind: FrameworkModuleSlotKind,
+    confidence: FrameworkModuleConfidence,
+    present: bool,
+    slot_index: i32,
+    flags: u32,
+    vendor_id: u32,
+    product_id: u32,
+    board_id: i32,
+) -> FrameworkModuleDescriptor {
+    FrameworkModuleDescriptor {
+        identity,
+        bus,
+        slot_kind,
+        confidence,
+        present: u8::from(present),
+        reserved_0: [0; 3],
+        slot_index,
+        flags,
+        vendor_id,
+        product_id,
+        board_id,
+    }
+}
+
+fn feature_flags_result(status: FrameworkStatus, flags: u64) -> FrameworkEcFeatureFlagsResult {
+    FrameworkEcFeatureFlagsResult { status, flags }
+}
+
+fn keyboard_backlight_result(
+    status: FrameworkStatus,
+    brightness_percent: u8,
+) -> FrameworkEcKeyboardBacklightResult {
+    FrameworkEcKeyboardBacklightResult {
+        status,
+        brightness_percent,
+        reserved: [0; 3],
+    }
+}
+
+fn fingerprint_led_result(
+    status: FrameworkStatus,
+    raw_level: u8,
+    level: FrameworkFingerprintLedLevel,
+) -> FrameworkEcFingerprintLedResult {
+    FrameworkEcFingerprintLedResult {
+        status,
+        state: FrameworkEcFingerprintLedState {
+            raw_level,
+            reserved: [0; 3],
+            level,
+        },
+    }
+}
+
+fn expansion_bay_status_result(
+    status: FrameworkStatus,
+    bay: FrameworkEcExpansionBayStatus,
+) -> FrameworkEcExpansionBayStatusResult {
+    FrameworkEcExpansionBayStatusResult { status, bay }
+}
+
+fn module_inventory_result(
+    status: FrameworkStatus,
+    inventory: FrameworkModuleInventory,
+) -> FrameworkEcModuleInventoryResult {
+    FrameworkEcModuleInventoryResult { status, inventory }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PdPortObservation {
+    connected: bool,
+    has_pd_contract: bool,
+    dp_alt_mode: bool,
+    active: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct HidModuleObservation {
+    vendor_id: u16,
+    product_id: u16,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct UsbModuleObservation {
+    vendor_id: u16,
+    product_id: u16,
+    slot_index: i32,
+}
+
+fn detect_expansion_cards_local() -> Vec<HidModuleObservation> {
+    let api = match HidApi::new() {
+        Ok(api) => api,
+        Err(_) => return Vec::new(),
+    };
+
+    hid::find_devices(&api, &hid::ALL_CARD_PIDS, None)
+        .into_iter()
+        .map(|device| HidModuleObservation {
+            vendor_id: device.vendor_id(),
+            product_id: device.product_id(),
+        })
+        .collect()
+}
+
+fn detect_audio_cards_local() -> Vec<UsbModuleObservation> {
+    let devices = match rusb::devices() {
+        Ok(devices) => devices,
+        Err(_) => return Vec::new(),
+    };
+
+    devices
+        .iter()
+        .filter_map(|device| {
+            let descriptor = device.device_descriptor().ok()?;
+            if descriptor.vendor_id() == audio_card::FRAMEWORK_VID
+                && descriptor.product_id() == audio_card::AUDIO_CARD_PID
+            {
+                Some(UsbModuleObservation {
+                    vendor_id: descriptor.vendor_id(),
+                    product_id: descriptor.product_id(),
+                    slot_index: -1,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn map_framework16_input_slot(port_numbers: &[u8]) -> i32 {
+    match port_numbers {
+        [4, 2] => 0,
+        [4, 3] => 1,
+        [3, 1] => 2,
+        [3, 2] => 3,
+        [3, 3] => 4,
+        _ => -1,
+    }
+}
+
+fn detect_input_modules_local() -> Vec<UsbModuleObservation> {
+    let devices = match rusb::devices() {
+        Ok(devices) => devices,
+        Err(_) => return Vec::new(),
+    };
+
+    devices
+        .iter()
+        .filter_map(|device| {
+            let descriptor = device.device_descriptor().ok()?;
+            if descriptor.vendor_id() != inputmodule::FRAMEWORK_VID
+                || !inputmodule::FRAMEWORK16_INPUTMODULE_PIDS.contains(&descriptor.product_id())
+            {
+                return None;
+            }
+
+            let slot_index = device
+                .port_numbers()
+                .ok()
+                .map(|ports| map_framework16_input_slot(&ports))
+                .unwrap_or(-1);
+
+            Some(UsbModuleObservation {
+                vendor_id: descriptor.vendor_id(),
+                product_id: descriptor.product_id(),
+                slot_index,
+            })
+        })
+        .collect()
+}
+
+fn detect_touchpads_local() -> Vec<HidModuleObservation> {
+    const TOUCHPAD_USAGE_PAGE: u16 = 0xFF00;
+    const TOUCHPAD_PIDS: [u16; 4] = [0x0274, 0x0239, 0x0360, 0x0343];
+
+    let api = match HidApi::new() {
+        Ok(api) => api,
+        Err(_) => return Vec::new(),
+    };
+
+    api.device_list()
+        .filter_map(|device| {
+            if device.vendor_id() == touchpad::PIX_VID
+                && TOUCHPAD_PIDS.contains(&device.product_id())
+                && device.usage_page() == TOUCHPAD_USAGE_PAGE
+            {
+                Some(HidModuleObservation {
+                    vendor_id: device.vendor_id(),
+                    product_id: device.product_id(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn detect_touchscreens_local() -> Vec<HidModuleObservation> {
+    let api = match HidApi::new() {
+        Ok(api) => api,
+        Err(_) => return Vec::new(),
+    };
+
+    api.device_list()
+        .filter_map(|device| {
+            let vendor_id = device.vendor_id();
+            let product_id = device.product_id();
+            let usage_page = device.usage_page();
+            let is_ili = vendor_id == touchscreen::ILI_VID
+                && product_id == touchscreen::ILI_PID
+                && usage_page == 0xFF00;
+            let is_hx = vendor_id == touchscreen::HX_VID && product_id == touchscreen::HX_PID;
+
+            if is_ili || is_hx {
+                Some(HidModuleObservation {
+                    vendor_id,
+                    product_id,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn detect_cameras_local() -> Vec<UsbModuleObservation> {
+    let devices = match rusb::devices() {
+        Ok(devices) => devices,
+        Err(_) => return Vec::new(),
+    };
+
+    devices
+        .iter()
+        .filter_map(|device| {
+            let descriptor = device.device_descriptor().ok()?;
+            if descriptor.vendor_id() == camera::FRAMEWORK_VID
+                && (descriptor.product_id() == camera::FRAMEWORK13_16_2ND_GEN_PID
+                    || descriptor.product_id() == camera::FRAMEWORK12_PID)
+            {
+                Some(UsbModuleObservation {
+                    vendor_id: descriptor.vendor_id(),
+                    product_id: descriptor.product_id(),
+                    slot_index: -1,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn read_pd_port_observation(ec: &CrosEc, port: u8) -> Option<PdPortObservation> {
+    let response = EcRequestGetPdPortState { port }.send_command(ec).ok()?;
+    let connected = response.c_state != 0;
+    let has_pd_contract = response.pd_state != 0;
+    let dp_alt_mode = response.pd_alt_mode_status != 0;
+    let active = response.active_port != 0 || dp_alt_mode;
+
+    Some(PdPortObservation {
+        connected,
+        has_pd_contract,
+        dp_alt_mode,
+        active,
+    })
+}
+
+fn pd_observation_flags(observation: PdPortObservation) -> u32 {
+    let mut flags = 0u32;
+    if observation.connected {
+        flags |= module_flag(FrameworkModuleFlag::Connected);
+    }
+    if observation.has_pd_contract {
+        flags |= module_flag(FrameworkModuleFlag::HasPdContract);
+    }
+    if observation.dp_alt_mode {
+        flags |= module_flag(FrameworkModuleFlag::DisplayAltMode);
+    }
+    if observation.active {
+        flags |= module_flag(FrameworkModuleFlag::Active);
+    }
+    flags
+}
+
+fn unknown_usb_c_descriptor(
+    slot_index: usize,
+    observation: PdPortObservation,
+) -> Option<FrameworkModuleDescriptor> {
+    if !observation.connected {
+        return None;
+    }
+
+    Some(module_descriptor(
+        FrameworkModuleIdentity::UnknownUsbCOccupant,
+        FrameworkModuleBus::Ec,
+        FrameworkModuleSlotKind::UsbCPort,
+        if observation.dp_alt_mode {
+            FrameworkModuleConfidence::DerivedStrong
+        } else {
+            FrameworkModuleConfidence::DerivedWeak
+        },
+        true,
+        slot_index as i32,
+        pd_observation_flags(observation),
+        0,
+        0,
+        -1,
+    ))
+}
+
+fn expansion_card_identity(product_id: u16) -> FrameworkModuleIdentity {
+    match product_id {
+        hid::DP_CARD_PID => FrameworkModuleIdentity::DpExpansionCard,
+        hid::HDMI_CARD_PID => FrameworkModuleIdentity::HdmiExpansionCard,
+        _ => FrameworkModuleIdentity::UnknownUsbCOccupant,
+    }
+}
+
+fn framework16_top_row_identity(product_id: u16) -> FrameworkModuleIdentity {
+    if product_id == inputmodule::LEDMATRIX_PID {
+        FrameworkModuleIdentity::Framework16LedMatrix
+    } else {
+        FrameworkModuleIdentity::Framework16KeyboardModule
+    }
+}
+
+fn input_deck_module_identity(module_type: InputModuleType) -> FrameworkModuleIdentity {
+    match module_type {
+        InputModuleType::KeyboardA
+        | InputModuleType::KeyboardB
+        | InputModuleType::FullWidth
+        | InputModuleType::GenericA
+        | InputModuleType::GenericB
+        | InputModuleType::GenericC
+        | InputModuleType::Short
+        | InputModuleType::Reserved1
+        | InputModuleType::Reserved2
+        | InputModuleType::Reserved3
+        | InputModuleType::Reserved4
+        | InputModuleType::Reserved5
+        | InputModuleType::Reserved15 => FrameworkModuleIdentity::Framework16KeyboardModule,
+        InputModuleType::HubBoard | InputModuleType::Touchpad | InputModuleType::Disconnected => {
+            FrameworkModuleIdentity::Framework16KeyboardModule
+        }
+    }
+}
+
+fn expansion_bay_identity(
+    board: FrameworkExpansionBayBoard,
+    vendor: FrameworkExpansionBayVendor,
+) -> FrameworkModuleIdentity {
+    match vendor {
+        FrameworkExpansionBayVendor::FanOnly => FrameworkModuleIdentity::ExpansionBayFanOnly,
+        FrameworkExpansionBayVendor::SsdHolder => FrameworkModuleIdentity::ExpansionBaySsdHolder,
+        FrameworkExpansionBayVendor::PcieAccessory => {
+            FrameworkModuleIdentity::ExpansionBayPcieAccessory
+        }
+        FrameworkExpansionBayVendor::AmdGpu => FrameworkModuleIdentity::ExpansionBayAmdGpu,
+        FrameworkExpansionBayVendor::NvidiaGpu => FrameworkModuleIdentity::ExpansionBayNvidiaGpu,
+        FrameworkExpansionBayVendor::Unknown | FrameworkExpansionBayVendor::Initializing => {
+            match board {
+                FrameworkExpansionBayBoard::DualInterposer => {
+                    FrameworkModuleIdentity::ExpansionBayDualInterposer
+                }
+                FrameworkExpansionBayBoard::SingleInterposer => {
+                    FrameworkModuleIdentity::ExpansionBaySingleInterposer
+                }
+                FrameworkExpansionBayBoard::UmaFans => FrameworkModuleIdentity::ExpansionBayUmaFans,
+                _ => FrameworkModuleIdentity::ExpansionBay,
+            }
+        }
+    }
+}
+
+fn push_detached_module(
+    detached: &mut [FrameworkModuleDescriptor; 4],
+    detached_count: &mut u8,
+    descriptor: FrameworkModuleDescriptor,
+) {
+    if let Some(slot) = detached.get_mut(*detached_count as usize) {
+        *slot = descriptor;
+        *detached_count += 1;
+    }
+}
+
+fn expansion_bay_status(ec: &CrosEc) -> Result<FrameworkEcExpansionBayStatus, FrameworkStatus> {
+    let info = EcRequestExpansionBayStatus {}
+        .send_command(ec)
+        .map_err(status_from_error)?;
+    let gpu = EcRequestGetGpuPcie {}
+        .send_command(ec)
+        .map_err(status_from_error)?;
+
+    let board = expansion_bay_board(info.expansion_bay_board());
+    let vendor = expansion_bay_vendor(match gpu.gpu_vendor {
+        0x00 => Some(GpuVendor::Initializing),
+        0x01 => Some(GpuVendor::FanOnly),
+        0x02 => Some(GpuVendor::GpuAmdR23M),
+        0x03 => Some(GpuVendor::SsdHolder),
+        0x04 => Some(GpuVendor::PcieAccessory),
+        0x05 => Some(GpuVendor::NvidiaGn22),
+        _ => None,
+    });
+    let config = gpu_pcie_config(match gpu.gpu_pcie_config {
+        0 => Some(GpuPcieConfig::Pcie8x1),
+        1 => Some(GpuPcieConfig::Pcie4x1),
+        2 => Some(GpuPcieConfig::Pcie4x2),
+        _ => None,
+    });
+    let present = !matches!(
+        board,
+        FrameworkExpansionBayBoard::NoModule | FrameworkExpansionBayBoard::Unknown
+    ) || matches!(
+        vendor,
+        FrameworkExpansionBayVendor::FanOnly
+            | FrameworkExpansionBayVendor::SsdHolder
+            | FrameworkExpansionBayVendor::PcieAccessory
+            | FrameworkExpansionBayVendor::AmdGpu
+            | FrameworkExpansionBayVendor::NvidiaGpu
+    );
+
+    let serial_number = ec
+        .get_gpu_serial()
+        .map(|serial| FrameworkByteBuffer::from_vec(serial.into_bytes()))
+        .unwrap_or_default();
+
+    Ok(FrameworkEcExpansionBayStatus {
+        present: u8::from(present),
+        enabled: u8::from(info.module_enabled()),
+        fault: u8::from(info.module_fault()),
+        door_closed: u8::from(info.hatch_switch_closed()),
+        board,
+        vendor,
+        config,
+        reserved: [0; 3],
+        serial_number,
+    })
+}
+
+fn feature_flags(ec: &CrosEc) -> Result<u64, FrameworkStatus> {
+    let mut flags = 0u64;
+
+    if feature_enabled(ec, EcFeatureCode::Keyboard)? {
+        flags |= framework_feature_flag(FrameworkEcFeatureFlag::Keyboard);
+    }
+    if feature_enabled(ec, EcFeatureCode::PwmKeyboardBacklight)? {
+        flags |= framework_feature_flag(FrameworkEcFeatureFlag::KeyboardBacklight);
+    }
+    if feature_enabled(ec, EcFeatureCode::Touchpad)? {
+        flags |= framework_feature_flag(FrameworkEcFeatureFlag::Touchpad);
+    }
+    if feature_enabled(ec, EcFeatureCode::Fingerprint)? {
+        flags |= framework_feature_flag(FrameworkEcFeatureFlag::Fingerprint);
+    }
+    if feature_enabled(ec, EcFeatureCode::MotionSense)? {
+        flags |= framework_feature_flag(FrameworkEcFeatureFlag::AmbientLight);
+    }
+    if feature_enabled(ec, EcFeatureCode::MotionSense)? {
+        flags |= framework_feature_flag(FrameworkEcFeatureFlag::TabletMode);
+    }
+
+    Ok(flags)
+}
+
+fn build_module_inventory(handle: &FrameworkEcHandle) -> FrameworkModuleInventory {
+    let mut usb_slots = [default_module_descriptor(); MAX_USB_C_SLOT_COUNT];
+    let mut top_row = [default_module_descriptor(); 5];
+    let mut detached = [default_module_descriptor(); 4];
+    let mut detached_count = 0u8;
+
+    let family = smbios::get_family();
+    let usb_c_slot_count = if family == Some(PlatformFamily::Framework16) {
+        6
+    } else {
+        4
+    };
+    let mut input_touchpad = default_module_descriptor();
+    let mut internal_keyboard = default_module_descriptor();
+    let mut internal_touchpad = default_module_descriptor();
+    let mut fingerprint_reader = default_module_descriptor();
+    let mut touchscreen_module = default_module_descriptor();
+    let mut webcam = default_module_descriptor();
+    let mut expansion_bay_module = default_module_descriptor();
+
+    let mut pd_observations = [None; MAX_USB_C_SLOT_COUNT];
+    for (index, slot) in usb_slots
+        .iter_mut()
+        .enumerate()
+        .take(usb_c_slot_count as usize)
+    {
+        pd_observations[index] = read_pd_port_observation(&handle.ec, index as u8);
+        if let Some(observation) = pd_observations[index] {
+            if let Some(descriptor) = unknown_usb_c_descriptor(index, observation) {
+                *slot = descriptor;
+            }
+        }
+    }
+
+    let expansion_cards = detect_expansion_cards_local();
+    let dp_slots: Vec<usize> = pd_observations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, observation)| observation.filter(|obs| obs.dp_alt_mode).map(|_| index))
+        .collect();
+
+    if expansion_cards.len() == 1 && dp_slots.len() == 1 {
+        let card = &expansion_cards[0];
+        let slot_index = dp_slots[0];
+        let mut flags = usb_slots[slot_index].flags;
+        flags |= module_flag(FrameworkModuleFlag::Connected);
+        usb_slots[slot_index] = module_descriptor(
+            expansion_card_identity(card.product_id),
+            FrameworkModuleBus::Composite,
+            FrameworkModuleSlotKind::UsbCPort,
+            FrameworkModuleConfidence::DerivedStrong,
+            true,
+            slot_index as i32,
+            flags,
+            card.vendor_id as u32,
+            card.product_id as u32,
+            -1,
+        );
+    } else {
+        for card in &expansion_cards {
+            push_detached_module(
+                &mut detached,
+                &mut detached_count,
+                module_descriptor(
+                    expansion_card_identity(card.product_id),
+                    FrameworkModuleBus::Hid,
+                    FrameworkModuleSlotKind::Detached,
+                    FrameworkModuleConfidence::Direct,
+                    true,
+                    -1,
+                    module_flag(FrameworkModuleFlag::Connected),
+                    card.vendor_id as u32,
+                    card.product_id as u32,
+                    -1,
+                ),
+            );
+        }
+    }
+
+    let audio_cards = detect_audio_cards_local();
+    let audio_candidates: Vec<usize> = pd_observations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, observation)| {
+            observation.and_then(|obs| {
+                if obs.connected
+                    && !obs.dp_alt_mode
+                    && matches!(
+                        usb_slots[index].identity,
+                        FrameworkModuleIdentity::UnknownUsbCOccupant
+                    )
+                {
+                    Some(index)
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+
+    if audio_cards.len() == 1 && audio_candidates.len() == 1 {
+        let card = &audio_cards[0];
+        let slot_index = audio_candidates[0];
+        let mut flags = usb_slots[slot_index].flags;
+        flags |= module_flag(FrameworkModuleFlag::Connected);
+        usb_slots[slot_index] = module_descriptor(
+            FrameworkModuleIdentity::AudioExpansionCard,
+            FrameworkModuleBus::Composite,
+            FrameworkModuleSlotKind::UsbCPort,
+            FrameworkModuleConfidence::DerivedWeak,
+            true,
+            slot_index as i32,
+            flags,
+            card.vendor_id as u32,
+            card.product_id as u32,
+            -1,
+        );
+    } else {
+        for card in &audio_cards {
+            push_detached_module(
+                &mut detached,
+                &mut detached_count,
+                module_descriptor(
+                    FrameworkModuleIdentity::AudioExpansionCard,
+                    FrameworkModuleBus::Usb,
+                    FrameworkModuleSlotKind::Detached,
+                    FrameworkModuleConfidence::Direct,
+                    true,
+                    -1,
+                    module_flag(FrameworkModuleFlag::Connected),
+                    card.vendor_id as u32,
+                    card.product_id as u32,
+                    -1,
+                ),
+            );
+        }
+    }
+
+    let input_top_row_count = if family == Some(PlatformFamily::Framework16) {
+        5
+    } else {
+        0
+    };
+    if input_top_row_count > 0 {
+        if let Ok(deck) = handle.ec.get_input_deck_status() {
+            for (index, slot) in deck.top_row_to_array().iter().copied().enumerate() {
+                top_row[index] = module_descriptor(
+                    input_deck_module_identity(slot),
+                    FrameworkModuleBus::Ec,
+                    FrameworkModuleSlotKind::InputDeckTopRow,
+                    FrameworkModuleConfidence::Direct,
+                    !matches!(slot, InputModuleType::Disconnected | InputModuleType::Short),
+                    index as i32,
+                    if !matches!(slot, InputModuleType::Disconnected | InputModuleType::Short) {
+                        module_flag(FrameworkModuleFlag::Connected)
+                    } else {
+                        0
+                    },
+                    0,
+                    0,
+                    -1,
+                );
+            }
+
+            input_touchpad = module_descriptor(
+                FrameworkModuleIdentity::Framework16TouchpadModule,
+                FrameworkModuleBus::Ec,
+                FrameworkModuleSlotKind::InputDeckTouchpad,
+                FrameworkModuleConfidence::Direct,
+                deck.touchpad_present,
+                0,
+                if deck.touchpad_present {
+                    module_flag(FrameworkModuleFlag::Connected)
+                } else {
+                    0
+                },
+                0,
+                0,
+                i32::from(deck.touchpad_id),
+            );
+        }
+
+        for module in detect_input_modules_local() {
+            if module.slot_index < 0 || module.slot_index >= top_row.len() as i32 {
+                continue;
+            }
+            top_row[module.slot_index as usize] = module_descriptor(
+                framework16_top_row_identity(module.product_id),
+                FrameworkModuleBus::Usb,
+                FrameworkModuleSlotKind::InputDeckTopRow,
+                FrameworkModuleConfidence::Direct,
+                true,
+                module.slot_index,
+                module_flag(FrameworkModuleFlag::Connected),
+                module.vendor_id as u32,
+                module.product_id as u32,
+                -1,
+            );
+        }
+    } else {
+        let keyboard_present =
+            feature_enabled(&handle.ec, EcFeatureCode::Keyboard).unwrap_or(false);
+        if keyboard_present {
+            internal_keyboard = module_descriptor(
+                FrameworkModuleIdentity::InternalKeyboard,
+                FrameworkModuleBus::Ec,
+                FrameworkModuleSlotKind::InternalFixed,
+                FrameworkModuleConfidence::DerivedStrong,
+                true,
+                -1,
+                module_flag(FrameworkModuleFlag::BuiltIn)
+                    | module_flag(FrameworkModuleFlag::Connected),
+                0,
+                0,
+                -1,
+            );
+        }
+    }
+
+    let touchpad_devices = detect_touchpads_local();
+    if family == Some(PlatformFamily::Framework16) {
+        if let Some(device) = touchpad_devices.first() {
+            input_touchpad = module_descriptor(
+                FrameworkModuleIdentity::Framework16TouchpadModule,
+                FrameworkModuleBus::Hid,
+                FrameworkModuleSlotKind::InputDeckTouchpad,
+                FrameworkModuleConfidence::Direct,
+                true,
+                0,
+                module_flag(FrameworkModuleFlag::Connected),
+                device.vendor_id as u32,
+                device.product_id as u32,
+                input_touchpad.board_id,
+            );
+        }
+    } else {
+        let mut present = feature_enabled(&handle.ec, EcFeatureCode::Touchpad).unwrap_or(false);
+        let mut confidence = if present {
+            FrameworkModuleConfidence::DerivedStrong
+        } else {
+            FrameworkModuleConfidence::Unknown
+        };
+        let mut vendor_id = 0u32;
+        let mut product_id = 0u32;
+        let board_id = handle
+            .ec
+            .read_board_id_hc(BoardIdType::Touchpad)
+            .ok()
+            .flatten()
+            .map(i32::from)
+            .unwrap_or(-1);
+
+        if let Some(device) = touchpad_devices.first() {
+            present = true;
+            confidence = FrameworkModuleConfidence::Direct;
+            vendor_id = device.vendor_id as u32;
+            product_id = device.product_id as u32;
+        }
+
+        if present {
+            internal_touchpad = module_descriptor(
+                FrameworkModuleIdentity::InternalTouchpad,
+                if vendor_id != 0 || product_id != 0 {
+                    FrameworkModuleBus::Hid
+                } else {
+                    FrameworkModuleBus::Ec
+                },
+                FrameworkModuleSlotKind::InternalFixed,
+                confidence,
+                true,
+                -1,
+                module_flag(FrameworkModuleFlag::BuiltIn)
+                    | module_flag(FrameworkModuleFlag::Connected),
+                vendor_id,
+                product_id,
+                board_id,
+            );
+        }
+    }
+
+    if feature_enabled(&handle.ec, EcFeatureCode::Fingerprint).unwrap_or(false)
+        || handle.ec.get_fp_led_level().is_ok()
+    {
+        fingerprint_reader = module_descriptor(
+            FrameworkModuleIdentity::FingerprintReader,
+            FrameworkModuleBus::Ec,
+            FrameworkModuleSlotKind::InternalFixed,
+            if handle.ec.get_fp_led_level().is_ok() {
+                FrameworkModuleConfidence::Direct
+            } else {
+                FrameworkModuleConfidence::DerivedStrong
+            },
+            true,
+            -1,
+            module_flag(FrameworkModuleFlag::BuiltIn) | module_flag(FrameworkModuleFlag::Connected),
+            0,
+            0,
+            -1,
+        );
+    }
+
+    if let Some(device) = detect_touchscreens_local().first() {
+        touchscreen_module = module_descriptor(
+            FrameworkModuleIdentity::Touchscreen,
+            FrameworkModuleBus::Hid,
+            FrameworkModuleSlotKind::InternalFixed,
+            FrameworkModuleConfidence::Direct,
+            true,
+            -1,
+            module_flag(FrameworkModuleFlag::BuiltIn) | module_flag(FrameworkModuleFlag::Connected),
+            device.vendor_id as u32,
+            device.product_id as u32,
+            -1,
+        );
+    }
+
+    if let Some(device) = detect_cameras_local().first() {
+        webcam = module_descriptor(
+            FrameworkModuleIdentity::Webcam,
+            FrameworkModuleBus::Usb,
+            FrameworkModuleSlotKind::InternalFixed,
+            FrameworkModuleConfidence::Direct,
+            true,
+            -1,
+            module_flag(FrameworkModuleFlag::BuiltIn) | module_flag(FrameworkModuleFlag::Connected),
+            device.vendor_id as u32,
+            device.product_id as u32,
+            -1,
+        );
+    }
+
+    if let Ok(bay) = expansion_bay_status(&handle.ec) {
+        if bay.present != 0 {
+            let mut flags = 0u32;
+            if bay.enabled != 0 {
+                flags |= module_flag(FrameworkModuleFlag::Enabled);
+            }
+            if bay.fault != 0 {
+                flags |= module_flag(FrameworkModuleFlag::Fault);
+            }
+            if bay.door_closed != 0 {
+                flags |= module_flag(FrameworkModuleFlag::DoorClosed);
+            }
+            flags |= module_flag(FrameworkModuleFlag::Connected);
+            expansion_bay_module = module_descriptor(
+                expansion_bay_identity(bay.board, bay.vendor),
+                FrameworkModuleBus::Ec,
+                FrameworkModuleSlotKind::ExpansionBay,
+                FrameworkModuleConfidence::Direct,
+                true,
+                0,
+                flags,
+                0,
+                0,
+                -1,
+            );
+        }
+    }
+
+    FrameworkModuleInventory {
+        usb_c_slot_count,
+        input_top_row_count,
+        detached_count,
+        reserved_0: 0,
+        usb_c_slot_0: usb_slots[0],
+        usb_c_slot_1: usb_slots[1],
+        usb_c_slot_2: usb_slots[2],
+        usb_c_slot_3: usb_slots[3],
+        usb_c_slot_4: usb_slots[4],
+        usb_c_slot_5: usb_slots[5],
+        input_top_row_0: top_row[0],
+        input_top_row_1: top_row[1],
+        input_top_row_2: top_row[2],
+        input_top_row_3: top_row[3],
+        input_top_row_4: top_row[4],
+        input_touchpad,
+        internal_keyboard,
+        internal_touchpad,
+        fingerprint_reader,
+        touchscreen: touchscreen_module,
+        webcam,
+        expansion_bay: expansion_bay_module,
+        detached_0: detached[0],
+        detached_1: detached[1],
+        detached_2: detached[2],
+        detached_3: detached[3],
     }
 }
 
@@ -1551,6 +2812,116 @@ pub unsafe extern "C" fn framework_ec_get_thermal_snapshot(
             },
         },
     )
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_feature_flags(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcFeatureFlagsResult {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => {
+            let mut result = default_feature_flags_result();
+            result.status = status;
+            return result;
+        }
+    };
+
+    match feature_flags(&handle.ec) {
+        Ok(flags) => feature_flags_result(FrameworkStatus::success(), flags),
+        Err(status) => feature_flags_result(status, 0),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_keyboard_backlight(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcKeyboardBacklightResult {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => {
+            let mut result = default_keyboard_backlight_result();
+            result.status = status;
+            return result;
+        }
+    };
+
+    match handle.ec.get_keyboard_backlight() {
+        Ok(level) => keyboard_backlight_result(FrameworkStatus::success(), level),
+        Err(error) => keyboard_backlight_result(status_from_error(error), 0),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_fingerprint_led(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcFingerprintLedResult {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => {
+            let mut result = default_fingerprint_led_result();
+            result.status = status;
+            return result;
+        }
+    };
+
+    match handle.ec.get_fp_led_level() {
+        Ok((raw_level, level)) => fingerprint_led_result(
+            FrameworkStatus::success(),
+            raw_level,
+            fingerprint_led_level(level),
+        ),
+        Err(error) => fingerprint_led_result(
+            status_from_error(error),
+            0,
+            FrameworkFingerprintLedLevel::Unknown,
+        ),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_expansion_bay_status(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcExpansionBayStatusResult {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => {
+            let mut result = default_expansion_bay_status_result();
+            result.status = status;
+            return result;
+        }
+    };
+
+    match expansion_bay_status(&handle.ec) {
+        Ok(bay) => expansion_bay_status_result(FrameworkStatus::success(), bay),
+        Err(status) => expansion_bay_status_result(status, default_expansion_bay_status()),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_module_inventory(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcModuleInventoryResult {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => {
+            let mut result = default_module_inventory_result();
+            result.status = status;
+            return result;
+        }
+    };
+
+    module_inventory_result(FrameworkStatus::success(), build_module_inventory(handle))
 }
 
 #[no_mangle]
