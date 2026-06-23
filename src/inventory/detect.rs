@@ -8,7 +8,6 @@ use hidapi::HidApi;
 
 use crate::*;
 
-
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct HidModuleObservation {
     pub(super) vendor_id: u16,

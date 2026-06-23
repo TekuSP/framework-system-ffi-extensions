@@ -867,7 +867,7 @@ pub enum FrameworkBoardIdType {
 pub struct FrameworkBoardIdResult {
     pub status: FrameworkStatus,
     pub board_id_type: FrameworkBoardIdType,
-    pub board_id: i8,   // -1 = invalid, 0–14 = version, 15 = not present
+    pub board_id: i8, // -1 = invalid, 0–14 = version, 15 = not present
     pub reserved: [u8; 3],
 }
 
@@ -875,7 +875,7 @@ pub struct FrameworkBoardIdResult {
 #[derive(Clone, Copy)]
 pub struct FrameworkActiveChargeResult {
     pub status: FrameworkStatus,
-    pub active_port_index: i8,  // -1 = none
+    pub active_port_index: i8, // -1 = none
     pub reserved: [u8; 3],
     pub pd: FrameworkEcPdPortState,
 }
@@ -980,7 +980,7 @@ pub struct FrameworkSensorInfoSnapshot {
 #[derive(Clone, Copy)]
 pub struct FrameworkAccelDataResult {
     pub status: FrameworkStatus,
-    pub lid_angle_degrees: i16,  // -1 = unreliable / accelerometers not present
+    pub lid_angle_degrees: i16, // -1 = unreliable / accelerometers not present
     pub reserved: [u8; 2],
     pub base_x: i16,
     pub base_y: i16,
@@ -1526,8 +1526,14 @@ pub unsafe extern "C" fn framework_ec_get_sensor_info(
         status,
         sensor_count: 0,
         reserved: [0; 3],
-        sensor_0: unknown, sensor_1: unknown, sensor_2: unknown, sensor_3: unknown,
-        sensor_4: unknown, sensor_5: unknown, sensor_6: unknown, sensor_7: unknown,
+        sensor_0: unknown,
+        sensor_1: unknown,
+        sensor_2: unknown,
+        sensor_3: unknown,
+        sensor_4: unknown,
+        sensor_5: unknown,
+        sensor_6: unknown,
+        sensor_7: unknown,
     };
     let handle = match require_handle(handle) {
         Ok(h) => h,
@@ -1546,10 +1552,14 @@ pub unsafe extern "C" fn framework_ec_get_sensor_info(
         status: FrameworkStatus::success(),
         sensor_count: sensors.len().min(8) as u8,
         reserved: [0; 3],
-        sensor_0: descriptors[0], sensor_1: descriptors[1],
-        sensor_2: descriptors[2], sensor_3: descriptors[3],
-        sensor_4: descriptors[4], sensor_5: descriptors[5],
-        sensor_6: descriptors[6], sensor_7: descriptors[7],
+        sensor_0: descriptors[0],
+        sensor_1: descriptors[1],
+        sensor_2: descriptors[2],
+        sensor_3: descriptors[3],
+        sensor_4: descriptors[4],
+        sensor_5: descriptors[5],
+        sensor_6: descriptors[6],
+        sensor_7: descriptors[7],
     }
 }
 
@@ -1566,14 +1576,23 @@ pub unsafe extern "C" fn framework_ec_get_accel_data(
         status,
         lid_angle_degrees: -1,
         reserved: [0; 2],
-        base_x: 0, base_y: 0, base_z: 0,
-        lid_x: 0, lid_y: 0, lid_z: 0,
+        base_x: 0,
+        base_y: 0,
+        base_z: 0,
+        lid_x: 0,
+        lid_y: 0,
+        lid_z: 0,
     };
     let handle = match require_handle(handle) {
         Ok(h) => h,
         Err(s) => return fail(s),
     };
-    controls::get_accel_data(&handle.ec).unwrap_or_else(|| fail(FrameworkStatus::with(FrameworkStatusCode::DataUnavailable, 0)))
+    controls::get_accel_data(&handle.ec).unwrap_or_else(|| {
+        fail(FrameworkStatus::with(
+            FrameworkStatusCode::DataUnavailable,
+            0,
+        ))
+    })
 }
 
 #[no_mangle]
@@ -1584,7 +1603,11 @@ pub unsafe extern "C" fn framework_ec_get_accel_data(
 pub unsafe extern "C" fn framework_ec_get_als_reading(
     handle: *const FrameworkEcHandle,
 ) -> FrameworkAlsResult {
-    let fail = |status| FrameworkAlsResult { status, lux_0: 0, lux_1: 0 };
+    let fail = |status| FrameworkAlsResult {
+        status,
+        lux_0: 0,
+        lux_1: 0,
+    };
     let handle = match require_handle(handle) {
         Ok(h) => h,
         Err(s) => return fail(s),
@@ -1595,7 +1618,10 @@ pub unsafe extern "C" fn framework_ec_get_als_reading(
             lux_0,
             lux_1,
         },
-        None => fail(FrameworkStatus::with(FrameworkStatusCode::DataUnavailable, 0)),
+        None => fail(FrameworkStatus::with(
+            FrameworkStatusCode::DataUnavailable,
+            0,
+        )),
     }
 }
 
@@ -1646,7 +1672,11 @@ pub unsafe extern "C" fn framework_ec_set_charge_current_limit(
         Ok(handle) => handle,
         Err(status) => return status,
     };
-    let soc = if battery_soc < 0 { None } else { Some(battery_soc as u32) };
+    let soc = if battery_soc < 0 {
+        None
+    } else {
+        Some(battery_soc as u32)
+    };
     match handle.ec.set_charge_current_limit(current_ma, soc) {
         Ok(()) => FrameworkStatus::success(),
         Err(error) => status_from_error(error),
@@ -1686,7 +1716,11 @@ pub unsafe extern "C" fn framework_ec_get_uptime(
 pub unsafe extern "C" fn framework_ec_get_s0ix_counter(
     handle: *const FrameworkEcHandle,
 ) -> FrameworkS0ixCounterResult {
-    let fail = |status| FrameworkS0ixCounterResult { status, s0ix_count: 0, reserved: 0 };
+    let fail = |status| FrameworkS0ixCounterResult {
+        status,
+        s0ix_count: 0,
+        reserved: 0,
+    };
     let handle = match require_handle(handle) {
         Ok(handle) => handle,
         Err(status) => return fail(status),
@@ -1749,7 +1783,10 @@ pub unsafe extern "C" fn framework_ec_set_input_deck_mode(
         Ok(handle) => handle,
         Err(status) => return status,
     };
-    match handle.ec.set_input_deck_mode(controls::into_deck_state_mode(mode)) {
+    match handle
+        .ec
+        .set_input_deck_mode(controls::into_deck_state_mode(mode))
+    {
         Ok(_) => FrameworkStatus::success(),
         Err(error) => status_from_error(error),
     }

@@ -1,6 +1,8 @@
 use crate::*;
 
-use super::conversions::{expansion_card_identity, expansion_card_type, module_descriptor, module_flag};
+use super::conversions::{
+    expansion_card_identity, expansion_card_type, module_descriptor, module_flag,
+};
 use super::detect::{
     detect_audio_cards_local, detect_ethernet_cards_local, detect_expansion_cards_local,
     detect_microsd_cards_local, detect_sd_cards_local, detect_ssd_cards_local,
@@ -107,7 +109,11 @@ pub(super) fn populate_usb_slots(
         .enumerate()
         .filter_map(|(i, pd)| {
             pd.and_then(|p| {
-                if p.alt_mode_flags & 0x03 != 0 { Some(i) } else { None }
+                if p.alt_mode_flags & 0x03 != 0 {
+                    Some(i)
+                } else {
+                    None
+                }
             })
         })
         .collect();
@@ -171,7 +177,11 @@ pub(super) fn populate_usb_slots(
                     usb_slots[i].identity,
                     FrameworkModuleIdentity::UnknownUsbCOccupant
                 );
-                if connected && no_dp && unknown { Some(i) } else { None }
+                if connected && no_dp && unknown {
+                    Some(i)
+                } else {
+                    None
+                }
             })
         })
         .collect();
@@ -306,7 +316,11 @@ fn assign_card_pass(
                     usb_slots[i].identity,
                     FrameworkModuleIdentity::UnknownUsbCOccupant
                 );
-                if connected && no_dp && unknown { Some(i) } else { None }
+                if connected && no_dp && unknown {
+                    Some(i)
+                } else {
+                    None
+                }
             })
         })
         .collect();
@@ -329,7 +343,8 @@ fn assign_card_pass(
             card.product_id as u32,
             -1,
         );
-        usb_slots[si] = make_expansion_card(base, pd, expansion_card_type(identity), card_confidence);
+        usb_slots[si] =
+            make_expansion_card(base, pd, expansion_card_type(identity), card_confidence);
     } else {
         for card in cards {
             push_detached_module(

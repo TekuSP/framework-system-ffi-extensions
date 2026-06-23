@@ -120,7 +120,9 @@ pub(super) fn expansion_card_type(identity: FrameworkModuleIdentity) -> Framewor
         FrameworkModuleIdentity::UsbAExpansionCard => FrameworkExpansionCardType::UsbA,
         FrameworkModuleIdentity::UsbCExpansionCard => FrameworkExpansionCardType::UsbC,
         FrameworkModuleIdentity::EthernetExpansionCard => FrameworkExpansionCardType::Ethernet,
-        FrameworkModuleIdentity::Ethernet10GExpansionCard => FrameworkExpansionCardType::Ethernet10G,
+        FrameworkModuleIdentity::Ethernet10GExpansionCard => {
+            FrameworkExpansionCardType::Ethernet10G
+        }
         FrameworkModuleIdentity::MicroSdExpansionCard => FrameworkExpansionCardType::MicroSd,
         FrameworkModuleIdentity::SdExpansionCard => FrameworkExpansionCardType::Sd,
         FrameworkModuleIdentity::SsdExpansionCard => FrameworkExpansionCardType::Ssd,

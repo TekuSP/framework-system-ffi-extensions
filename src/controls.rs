@@ -5,9 +5,9 @@ use framework_lib::chromium_ec::commands::{
 use framework_lib::chromium_ec::{CrosEc, CrosEcDriver, EcError, EcRequestRaw};
 
 use crate::{
-    FrameworkAccelDataResult, FrameworkDeckStateMode, FrameworkSensorCategory,
-    FrameworkSensorChip, FrameworkSensorDescriptor, FrameworkSensorLocation, FrameworkSensorType,
-    FrameworkStatus, FrameworkTabletModeOverride,
+    FrameworkAccelDataResult, FrameworkDeckStateMode, FrameworkSensorCategory, FrameworkSensorChip,
+    FrameworkSensorDescriptor, FrameworkSensorLocation, FrameworkSensorType, FrameworkStatus,
+    FrameworkTabletModeOverride,
 };
 
 pub(crate) struct UptimeInfo {
@@ -25,7 +25,10 @@ pub(crate) fn get_uptime(ec: &CrosEc) -> Result<UptimeInfo, EcError> {
     })
 }
 
-pub(crate) fn set_tablet_mode(ec: &CrosEc, mode: FrameworkTabletModeOverride) -> Result<(), EcError> {
+pub(crate) fn set_tablet_mode(
+    ec: &CrosEc,
+    mode: FrameworkTabletModeOverride,
+) -> Result<(), EcError> {
     EcRequestSetTabletMode { mode: mode as u8 }.send_command(ec)?;
     Ok(())
 }
@@ -54,7 +57,11 @@ pub(crate) fn get_accel_data(ec: &CrosEc) -> Option<FrameworkAccelDataResult> {
     let lid_accel_raw = ec.read_memory(EC_MEMMAP_ACC_DATA + 8, 6)?;
 
     let lid_angle_raw = u16::from_le_bytes([lid_raw[0], lid_raw[1]]);
-    let lid_angle_degrees = if lid_angle_raw == LID_ANGLE_UNRELIABLE { -1i16 } else { lid_angle_raw as i16 };
+    let lid_angle_degrees = if lid_angle_raw == LID_ANGLE_UNRELIABLE {
+        -1i16
+    } else {
+        lid_angle_raw as i16
+    };
 
     Some(FrameworkAccelDataResult {
         status: FrameworkStatus::success(),
@@ -90,13 +97,14 @@ pub(crate) fn into_sensor_descriptor(info: &MotionSenseInfo) -> FrameworkSensorD
 
 fn sensor_category(t: FrameworkSensorType) -> FrameworkSensorCategory {
     match t {
-        FrameworkSensorType::Accel | FrameworkSensorType::Gyro | FrameworkSensorType::Mag
-            => FrameworkSensorCategory::Motion,
-        FrameworkSensorType::Light | FrameworkSensorType::LightRgb
-        | FrameworkSensorType::Prox | FrameworkSensorType::Baro
-            => FrameworkSensorCategory::Environmental,
-        FrameworkSensorType::Activity | FrameworkSensorType::Sync
-            => FrameworkSensorCategory::Other,
+        FrameworkSensorType::Accel | FrameworkSensorType::Gyro | FrameworkSensorType::Mag => {
+            FrameworkSensorCategory::Motion
+        }
+        FrameworkSensorType::Light
+        | FrameworkSensorType::LightRgb
+        | FrameworkSensorType::Prox
+        | FrameworkSensorType::Baro => FrameworkSensorCategory::Environmental,
+        FrameworkSensorType::Activity | FrameworkSensorType::Sync => FrameworkSensorCategory::Other,
         FrameworkSensorType::Unknown => FrameworkSensorCategory::Unknown,
     }
 }

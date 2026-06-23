@@ -166,7 +166,8 @@ pub(super) fn detect_internal_modules(
                 confidence,
                 true,
                 -1,
-                module_flag(FrameworkModuleFlag::BuiltIn) | module_flag(FrameworkModuleFlag::Connected),
+                module_flag(FrameworkModuleFlag::BuiltIn)
+                    | module_flag(FrameworkModuleFlag::Connected),
                 vendor_id,
                 product_id,
                 board_id,
