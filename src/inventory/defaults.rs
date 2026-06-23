@@ -1,3 +1,4 @@
+use crate::pd;
 use crate::*;
 
 pub(crate) fn default_feature_flags_result() -> FrameworkEcFeatureFlagsResult {
@@ -67,35 +68,55 @@ pub(super) fn default_module_descriptor() -> FrameworkModuleDescriptor {
     }
 }
 
+pub(super) fn default_expansion_card_module_descriptor() -> FrameworkExpansionCardModuleDescriptor {
+    let d = default_module_descriptor();
+    FrameworkExpansionCardModuleDescriptor {
+        identity: d.identity,
+        bus: d.bus,
+        slot_kind: d.slot_kind,
+        confidence: d.confidence,
+        present: d.present,
+        reserved_0: d.reserved_0,
+        slot_index: d.slot_index,
+        flags: d.flags,
+        vendor_id: d.vendor_id,
+        product_id: d.product_id,
+        board_id: d.board_id,
+        pd: pd::default_pd_port_state(),
+        card_type: FrameworkExpansionCardType::Unknown,
+        card_confidence: FrameworkModuleConfidence::Unknown,
+        reserved: 0,
+    }
+}
+
 fn default_module_inventory() -> FrameworkModuleInventory {
-    let none = default_module_descriptor();
     FrameworkModuleInventory {
         usb_c_slot_count: 0,
         input_top_row_count: 0,
         detached_count: 0,
         reserved_0: 0,
-        usb_c_slot_0: none,
-        usb_c_slot_1: none,
-        usb_c_slot_2: none,
-        usb_c_slot_3: none,
-        usb_c_slot_4: none,
-        usb_c_slot_5: none,
-        input_top_row_0: none,
-        input_top_row_1: none,
-        input_top_row_2: none,
-        input_top_row_3: none,
-        input_top_row_4: none,
-        input_touchpad: none,
-        internal_keyboard: none,
-        internal_touchpad: none,
-        fingerprint_reader: none,
-        touchscreen: none,
-        webcam: none,
-        expansion_bay: none,
-        detached_0: none,
-        detached_1: none,
-        detached_2: none,
-        detached_3: none,
+        usb_c_slot_0: default_expansion_card_module_descriptor(),
+        usb_c_slot_1: default_expansion_card_module_descriptor(),
+        usb_c_slot_2: default_expansion_card_module_descriptor(),
+        usb_c_slot_3: default_expansion_card_module_descriptor(),
+        usb_c_slot_4: default_expansion_card_module_descriptor(),
+        usb_c_slot_5: default_expansion_card_module_descriptor(),
+        input_top_row_0: default_module_descriptor(),
+        input_top_row_1: default_module_descriptor(),
+        input_top_row_2: default_module_descriptor(),
+        input_top_row_3: default_module_descriptor(),
+        input_top_row_4: default_module_descriptor(),
+        input_touchpad: default_module_descriptor(),
+        internal_keyboard: default_module_descriptor(),
+        internal_touchpad: default_module_descriptor(),
+        fingerprint_reader: default_module_descriptor(),
+        touchscreen: default_module_descriptor(),
+        webcam: default_module_descriptor(),
+        expansion_bay: default_module_descriptor(),
+        detached_0: default_module_descriptor(),
+        detached_1: default_module_descriptor(),
+        detached_2: default_module_descriptor(),
+        detached_3: default_module_descriptor(),
     }
 }
 

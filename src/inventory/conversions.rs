@@ -29,6 +29,20 @@ pub(crate) fn fingerprint_led_level(
     }
 }
 
+pub(crate) fn fp_led_brightness_level(
+    level: FrameworkFingerprintLedLevel,
+) -> Option<FpLedBrightnessLevel> {
+    match level {
+        FrameworkFingerprintLedLevel::High => Some(FpLedBrightnessLevel::High),
+        FrameworkFingerprintLedLevel::Medium => Some(FpLedBrightnessLevel::Medium),
+        FrameworkFingerprintLedLevel::Low => Some(FpLedBrightnessLevel::Low),
+        FrameworkFingerprintLedLevel::UltraLow => Some(FpLedBrightnessLevel::UltraLow),
+        FrameworkFingerprintLedLevel::Auto => Some(FpLedBrightnessLevel::Auto),
+        // Custom is get-only per EC protocol; Unknown is not a valid set target
+        FrameworkFingerprintLedLevel::Custom | FrameworkFingerprintLedLevel::Unknown => None,
+    }
+}
+
 pub(super) fn expansion_bay_board(
     board: Result<ExpansionBayBoard, ExpansionBayIssue>,
 ) -> FrameworkExpansionBayBoard {
@@ -95,6 +109,24 @@ pub(super) fn expansion_card_identity(product_id: u16) -> FrameworkModuleIdentit
         hid::DP_CARD_PID => FrameworkModuleIdentity::DpExpansionCard,
         hid::HDMI_CARD_PID => FrameworkModuleIdentity::HdmiExpansionCard,
         _ => FrameworkModuleIdentity::UnknownUsbCOccupant,
+    }
+}
+
+pub(super) fn expansion_card_type(identity: FrameworkModuleIdentity) -> FrameworkExpansionCardType {
+    match identity {
+        FrameworkModuleIdentity::DpExpansionCard => FrameworkExpansionCardType::DisplayPort,
+        FrameworkModuleIdentity::HdmiExpansionCard => FrameworkExpansionCardType::Hdmi,
+        FrameworkModuleIdentity::AudioExpansionCard => FrameworkExpansionCardType::Audio,
+        FrameworkModuleIdentity::UsbAExpansionCard => FrameworkExpansionCardType::UsbA,
+        FrameworkModuleIdentity::UsbCExpansionCard => FrameworkExpansionCardType::UsbC,
+        FrameworkModuleIdentity::EthernetExpansionCard => FrameworkExpansionCardType::Ethernet,
+        FrameworkModuleIdentity::Ethernet10GExpansionCard => {
+            FrameworkExpansionCardType::Ethernet10G
+        }
+        FrameworkModuleIdentity::MicroSdExpansionCard => FrameworkExpansionCardType::MicroSd,
+        FrameworkModuleIdentity::SdExpansionCard => FrameworkExpansionCardType::Sd,
+        FrameworkModuleIdentity::SsdExpansionCard => FrameworkExpansionCardType::Ssd,
+        _ => FrameworkExpansionCardType::Unknown,
     }
 }
 

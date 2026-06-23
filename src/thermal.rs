@@ -1,11 +1,13 @@
 use framework_lib::chromium_ec::commands::EcFeatureCode;
 use framework_lib::chromium_ec::{CrosEc, CrosEcDriver};
+use framework_lib::smbios;
+use framework_lib::smbios::PlatformFamily;
 
 use crate::{
     FrameworkBatterySnapshot, FrameworkBatteryState, FrameworkByteBuffer, FrameworkFanCapabilities,
-    FrameworkFanFeaturesState, FrameworkFanReading, FrameworkFanState, FrameworkPowerSnapshot,
-    FrameworkPowerSourceState, FrameworkStatus, FrameworkTemperatureReading,
-    FrameworkTemperatureState, FrameworkThermalSnapshot,
+    FrameworkFanFeaturesState, FrameworkFanName, FrameworkFanReading, FrameworkFanState,
+    FrameworkPowerSnapshot, FrameworkPowerSourceState, FrameworkStatus,
+    FrameworkTemperatureReading, FrameworkTemperatureState, FrameworkThermalSnapshot,
 };
 
 const THERMAL_SENSOR_COUNT: usize = 8;
@@ -168,11 +170,25 @@ fn default_temperature_reading() -> FrameworkTemperatureReading {
     }
 }
 
+fn fan_name(fan_index: usize, family: Option<PlatformFamily>) -> FrameworkFanName {
+    match (fan_index, family) {
+        (0, Some(PlatformFamily::Framework12)) => FrameworkFanName::ApuFan,
+        (0, Some(PlatformFamily::Framework13)) => FrameworkFanName::ApuFan,
+        (0, Some(PlatformFamily::Framework16)) => FrameworkFanName::LeftFan,
+        (1, Some(PlatformFamily::Framework16)) => FrameworkFanName::RightFan,
+        (0, Some(PlatformFamily::FrameworkDesktop)) => FrameworkFanName::ApuFan,
+        (1, Some(PlatformFamily::FrameworkDesktop)) => FrameworkFanName::FrontFan,
+        (2, Some(PlatformFamily::FrameworkDesktop)) => FrameworkFanName::ThirdFan,
+        (_, Some(_)) => FrameworkFanName::Generic,
+        (_, None) => FrameworkFanName::Unknown,
+    }
+}
+
 fn default_fan_reading() -> FrameworkFanReading {
     FrameworkFanReading {
         state: FrameworkFanState::NotPresent,
         rpm: 0,
-        reserved: 0,
+        name: FrameworkFanName::Unknown,
     }
 }
 
@@ -262,6 +278,7 @@ pub(crate) fn build_fan_capabilities(
 
 pub(crate) fn build_thermal_snapshot(ec: &CrosEc) -> Option<FrameworkThermalSnapshot> {
     let snapshot = thermal_snapshot(ec)?;
+    let family = smbios::get_family();
     let mut temperatures = [default_temperature_reading(); THERMAL_SENSOR_COUNT];
     for (index, reading) in snapshot.temperatures.iter().enumerate() {
         temperatures[index] = FrameworkTemperatureReading {
@@ -285,22 +302,22 @@ pub(crate) fn build_thermal_snapshot(ec: &CrosEc) -> Option<FrameworkThermalSnap
         fan_0: FrameworkFanReading {
             state: fan_state(snapshot.fan_present[0], snapshot.fan_stalled[0]),
             rpm: snapshot.fan_rpms[0],
-            reserved: 0,
+            name: fan_name(0, family),
         },
         fan_1: FrameworkFanReading {
             state: fan_state(snapshot.fan_present[1], snapshot.fan_stalled[1]),
             rpm: snapshot.fan_rpms[1],
-            reserved: 0,
+            name: fan_name(1, family),
         },
         fan_2: FrameworkFanReading {
             state: fan_state(snapshot.fan_present[2], snapshot.fan_stalled[2]),
             rpm: snapshot.fan_rpms[2],
-            reserved: 0,
+            name: fan_name(2, family),
         },
         fan_3: FrameworkFanReading {
             state: fan_state(snapshot.fan_present[3], snapshot.fan_stalled[3]),
             rpm: snapshot.fan_rpms[3],
-            reserved: 0,
+            name: fan_name(3, family),
         },
     })
 }

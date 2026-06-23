@@ -1,24 +1,12 @@
 use framework_lib::audio_card;
 use framework_lib::camera;
 use framework_lib::ccgx::hid;
-use framework_lib::chromium_ec::commands::EcRequestGetPdPortState;
-use framework_lib::chromium_ec::{CrosEc, EcRequestRaw};
 use framework_lib::inputmodule;
 use framework_lib::touchpad;
 use framework_lib::touchscreen;
 use hidapi::HidApi;
 
 use crate::*;
-
-use super::conversions::{module_descriptor, module_flag};
-
-#[derive(Clone, Copy, Debug, Default)]
-pub(super) struct PdPortObservation {
-    pub(super) connected: bool,
-    pub(super) has_pd_contract: bool,
-    pub(super) dp_alt_mode: bool,
-    pub(super) active: bool,
-}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct HidModuleObservation {
@@ -44,6 +32,145 @@ pub(super) fn detect_expansion_cards_local() -> Vec<HidModuleObservation> {
         .map(|device| HidModuleObservation {
             vendor_id: device.vendor_id(),
             product_id: device.product_id(),
+        })
+        .collect()
+}
+
+pub(super) fn detect_ssd_cards_local() -> Vec<UsbModuleObservation> {
+    const FRAMEWORK_VID: u16 = 0x32AC;
+    const SSD_EXPANSION_CARD_PID: u16 = 0x0005;
+
+    let devices = match rusb::devices() {
+        Ok(devices) => devices,
+        Err(_) => return Vec::new(),
+    };
+
+    devices
+        .iter()
+        .filter_map(|device| {
+            let descriptor = device.device_descriptor().ok()?;
+            if descriptor.vendor_id() == FRAMEWORK_VID
+                && descriptor.product_id() == SSD_EXPANSION_CARD_PID
+            {
+                Some(UsbModuleObservation {
+                    vendor_id: descriptor.vendor_id(),
+                    product_id: descriptor.product_id(),
+                    slot_index: -1,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+pub(super) fn detect_usb_a_cards_local() -> Vec<UsbModuleObservation> {
+    const REALTEK_VID: u16 = 0x0BDA;
+    const RTL5432_PID: u16 = 0x5432;
+    const RTL5424_PID: u16 = 0x5424;
+    const GENESYS_VID: u16 = 0x05E3;
+    const GL3590_PID: u16 = 0x0625;
+
+    let devices = match rusb::devices() {
+        Ok(devices) => devices,
+        Err(_) => return Vec::new(),
+    };
+
+    devices
+        .iter()
+        .filter_map(|device| {
+            let descriptor = device.device_descriptor().ok()?;
+            let vid = descriptor.vendor_id();
+            let pid = descriptor.product_id();
+            let matches = (vid == REALTEK_VID && (pid == RTL5432_PID || pid == RTL5424_PID))
+                || (vid == GENESYS_VID && pid == GL3590_PID);
+            if matches {
+                Some(UsbModuleObservation {
+                    vendor_id: vid,
+                    product_id: pid,
+                    slot_index: -1,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+pub(super) fn detect_ethernet_cards_local() -> Vec<UsbModuleObservation> {
+    const REALTEK_VID: u16 = 0x0BDA;
+    const RTL8156B_PID: u16 = 0x8156;
+
+    let devices = match rusb::devices() {
+        Ok(devices) => devices,
+        Err(_) => return Vec::new(),
+    };
+
+    devices
+        .iter()
+        .filter_map(|device| {
+            let descriptor = device.device_descriptor().ok()?;
+            if descriptor.vendor_id() == REALTEK_VID && descriptor.product_id() == RTL8156B_PID {
+                Some(UsbModuleObservation {
+                    vendor_id: descriptor.vendor_id(),
+                    product_id: descriptor.product_id(),
+                    slot_index: -1,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+pub(super) fn detect_sd_cards_local() -> Vec<UsbModuleObservation> {
+    const GENESYS_VID: u16 = 0x05E3;
+    const GL3230_SD_PID: u16 = 0x0749;
+
+    let devices = match rusb::devices() {
+        Ok(devices) => devices,
+        Err(_) => return Vec::new(),
+    };
+
+    devices
+        .iter()
+        .filter_map(|device| {
+            let descriptor = device.device_descriptor().ok()?;
+            if descriptor.vendor_id() == GENESYS_VID && descriptor.product_id() == GL3230_SD_PID {
+                Some(UsbModuleObservation {
+                    vendor_id: descriptor.vendor_id(),
+                    product_id: descriptor.product_id(),
+                    slot_index: -1,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+pub(super) fn detect_microsd_cards_local() -> Vec<UsbModuleObservation> {
+    const GENESYS_VID: u16 = 0x05E3;
+    const GL_MICROSD_PID: u16 = 0x0751;
+
+    let devices = match rusb::devices() {
+        Ok(devices) => devices,
+        Err(_) => return Vec::new(),
+    };
+
+    devices
+        .iter()
+        .filter_map(|device| {
+            let descriptor = device.device_descriptor().ok()?;
+            if descriptor.vendor_id() == GENESYS_VID && descriptor.product_id() == GL_MICROSD_PID {
+                Some(UsbModuleObservation {
+                    vendor_id: descriptor.vendor_id(),
+                    product_id: descriptor.product_id(),
+                    slot_index: -1,
+                })
+            } else {
+                None
+            }
         })
         .collect()
 }
@@ -193,64 +320,6 @@ pub(super) fn detect_cameras_local() -> Vec<UsbModuleObservation> {
             }
         })
         .collect()
-}
-
-pub(super) fn read_pd_port_observation(ec: &CrosEc, port: u8) -> Option<PdPortObservation> {
-    let response = EcRequestGetPdPortState { port }.send_command(ec).ok()?;
-    let connected = response.c_state != 0;
-    let has_pd_contract = response.pd_state != 0;
-    let dp_alt_mode = response.pd_alt_mode_status != 0;
-    let active = response.active_port != 0 || dp_alt_mode;
-
-    Some(PdPortObservation {
-        connected,
-        has_pd_contract,
-        dp_alt_mode,
-        active,
-    })
-}
-
-fn pd_observation_flags(observation: PdPortObservation) -> u32 {
-    let mut flags = 0u32;
-    if observation.connected {
-        flags |= module_flag(FrameworkModuleFlag::Connected);
-    }
-    if observation.has_pd_contract {
-        flags |= module_flag(FrameworkModuleFlag::HasPdContract);
-    }
-    if observation.dp_alt_mode {
-        flags |= module_flag(FrameworkModuleFlag::DisplayAltMode);
-    }
-    if observation.active {
-        flags |= module_flag(FrameworkModuleFlag::Active);
-    }
-    flags
-}
-
-pub(super) fn unknown_usb_c_descriptor(
-    slot_index: usize,
-    observation: PdPortObservation,
-) -> Option<FrameworkModuleDescriptor> {
-    if !observation.connected {
-        return None;
-    }
-
-    Some(module_descriptor(
-        FrameworkModuleIdentity::UnknownUsbCOccupant,
-        FrameworkModuleBus::Ec,
-        FrameworkModuleSlotKind::UsbCPort,
-        if observation.dp_alt_mode {
-            FrameworkModuleConfidence::DerivedStrong
-        } else {
-            FrameworkModuleConfidence::DerivedWeak
-        },
-        true,
-        slot_index as i32,
-        pd_observation_flags(observation),
-        0,
-        0,
-        -1,
-    ))
 }
 
 pub(super) fn push_detached_module(
