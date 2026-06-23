@@ -1,4 +1,4 @@
-use framework_lib::chromium_ec::CrosEc;
+use framework_lib::chromium_ec::{CrosEc, EcError, EcResponseStatus};
 use framework_lib::power;
 use framework_lib::smbios;
 
@@ -851,6 +851,153 @@ pub enum FrameworkDeckStateMode {
     ForceOff = 4,
 }
 
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkBoardIdType {
+    Mainboard = 0,
+    PowerButtonBoard = 1,
+    Touchpad = 2,
+    AudioBoard = 3,
+    DGpu0 = 4,
+    DGpu1 = 5,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkBoardIdResult {
+    pub status: FrameworkStatus,
+    pub board_id_type: FrameworkBoardIdType,
+    pub board_id: i8,   // -1 = invalid, 0–14 = version, 15 = not present
+    pub reserved: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkActiveChargeResult {
+    pub status: FrameworkStatus,
+    pub active_port_index: i8,  // -1 = none
+    pub reserved: [u8; 3],
+    pub pd: FrameworkEcPdPortState,
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkSensorCategory {
+    Motion = 0,
+    Environmental = 1,
+    Other = 2,
+    Unknown = -1,
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkSensorType {
+    Accel = 0,
+    Gyro = 1,
+    Mag = 2,
+    Prox = 3,
+    Light = 4,
+    Activity = 5,
+    Baro = 6,
+    Sync = 7,
+    LightRgb = 8,
+    Unknown = -1,
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkSensorLocation {
+    Base = 0,
+    Lid = 1,
+    Camera = 2,
+    Unknown = -1,
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkSensorChip {
+    Kxcj9 = 0,
+    Lsm6ds0 = 1,
+    Bmi160 = 2,
+    Si1141 = 3,
+    Si1142 = 4,
+    Si1143 = 5,
+    Kx022 = 6,
+    L3gd20h = 7,
+    Bma255 = 8,
+    Bmp280 = 9,
+    Opt3001 = 10,
+    Bh1730 = 11,
+    Gpio = 12,
+    Lis2dh = 13,
+    Lsm6dsm = 14,
+    Lis2de = 15,
+    Lis2mdl = 16,
+    Lsm6ds3 = 17,
+    Lsm6dso = 18,
+    Lng2dm = 19,
+    Tcs3400 = 20,
+    Lis2dw12 = 21,
+    Lis2dwl = 22,
+    Lis2ds = 23,
+    Bmi260 = 24,
+    Icm426xx = 25,
+    Icm42607 = 26,
+    Bma422 = 27,
+    Bmi323 = 28,
+    Bmi220 = 29,
+    Cm32183 = 30,
+    Veml3328 = 31,
+    Unknown = -1,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameworkSensorDescriptor {
+    pub category: FrameworkSensorCategory,
+    pub sensor_type: FrameworkSensorType,
+    pub location: FrameworkSensorLocation,
+    pub chip: FrameworkSensorChip,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkSensorInfoSnapshot {
+    pub status: FrameworkStatus,
+    pub sensor_count: u8,
+    pub reserved: [u8; 3],
+    pub sensor_0: FrameworkSensorDescriptor,
+    pub sensor_1: FrameworkSensorDescriptor,
+    pub sensor_2: FrameworkSensorDescriptor,
+    pub sensor_3: FrameworkSensorDescriptor,
+    pub sensor_4: FrameworkSensorDescriptor,
+    pub sensor_5: FrameworkSensorDescriptor,
+    pub sensor_6: FrameworkSensorDescriptor,
+    pub sensor_7: FrameworkSensorDescriptor,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkAccelDataResult {
+    pub status: FrameworkStatus,
+    pub lid_angle_degrees: i16,  // -1 = unreliable / accelerometers not present
+    pub reserved: [u8; 2],
+    pub base_x: i16,
+    pub base_y: i16,
+    pub base_z: i16,
+    pub lid_x: i16,
+    pub lid_y: i16,
+    pub lid_z: i16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkAlsResult {
+    pub status: FrameworkStatus,
+    pub lux_0: u32,
+    pub lux_1: u32,
+}
+
 #[no_mangle]
 pub extern "C" fn framework_ec_driver_is_supported(driver: FrameworkEcDriver) -> bool {
     runtime::driver_is_supported(driver)
@@ -1291,6 +1438,164 @@ pub unsafe extern "C" fn framework_ec_set_charge_limits(
     match handle.ec.set_charge_limit(min_percent, max_percent) {
         Ok(()) => FrameworkStatus::success(),
         Err(error) => status_from_error(error),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_read_board_id(
+    handle: *const FrameworkEcHandle,
+    board_id_type: FrameworkBoardIdType,
+) -> FrameworkBoardIdResult {
+    let fail = |status| FrameworkBoardIdResult {
+        status,
+        board_id_type,
+        board_id: -1,
+        reserved: [0; 3],
+    };
+    let handle = match require_handle(handle) {
+        Ok(h) => h,
+        Err(s) => return fail(s),
+    };
+    match controls::read_board_id(&handle.ec, board_id_type as u8) {
+        Ok(board_id) => FrameworkBoardIdResult {
+            status: FrameworkStatus::success(),
+            board_id_type,
+            board_id,
+            reserved: [0; 3],
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+/// Scans ports 0–5 and returns the first whose `active_port` flag is set.
+/// Returns `active_port_index = -1` with a zeroed `pd` field if no port is
+/// actively charging.
+pub unsafe extern "C" fn framework_ec_get_active_charge(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkActiveChargeResult {
+    let fail = |status| FrameworkActiveChargeResult {
+        status,
+        active_port_index: -1,
+        reserved: [0; 3],
+        pd: pd::default_pd_port_state(),
+    };
+    let handle = match require_handle(handle) {
+        Ok(h) => h,
+        Err(s) => return fail(s),
+    };
+    for port in 0u8..6 {
+        let state = pd::query_pd_port_state(&handle.ec, port);
+        if state.active_port != 0 {
+            return FrameworkActiveChargeResult {
+                status: FrameworkStatus::success(),
+                active_port_index: port as i8,
+                reserved: [0; 3],
+                pd: state,
+            };
+        }
+    }
+    FrameworkActiveChargeResult {
+        status: FrameworkStatus::success(),
+        active_port_index: -1,
+        reserved: [0; 3],
+        pd: pd::default_pd_port_state(),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+/// Call once at startup to discover what sensors are present.
+/// Returns `sensor_count = 0` with success on platforms where the EC does not
+/// support motionsense commands.
+pub unsafe extern "C" fn framework_ec_get_sensor_info(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkSensorInfoSnapshot {
+    let unknown = FrameworkSensorDescriptor {
+        category: FrameworkSensorCategory::Unknown,
+        sensor_type: FrameworkSensorType::Unknown,
+        location: FrameworkSensorLocation::Unknown,
+        chip: FrameworkSensorChip::Unknown,
+    };
+    let fail = |status| FrameworkSensorInfoSnapshot {
+        status,
+        sensor_count: 0,
+        reserved: [0; 3],
+        sensor_0: unknown, sensor_1: unknown, sensor_2: unknown, sensor_3: unknown,
+        sensor_4: unknown, sensor_5: unknown, sensor_6: unknown, sensor_7: unknown,
+    };
+    let handle = match require_handle(handle) {
+        Ok(h) => h,
+        Err(s) => return fail(s),
+    };
+    let sensors = match handle.ec.motionsense_sensor_info() {
+        Ok(s) => s,
+        Err(EcError::Response(EcResponseStatus::InvalidCommand)) => vec![],
+        Err(error) => return fail(status_from_error(error)),
+    };
+    let mut descriptors = [unknown; 8];
+    for (i, info) in sensors.iter().take(8).enumerate() {
+        descriptors[i] = controls::into_sensor_descriptor(info);
+    }
+    FrameworkSensorInfoSnapshot {
+        status: FrameworkStatus::success(),
+        sensor_count: sensors.len().min(8) as u8,
+        reserved: [0; 3],
+        sensor_0: descriptors[0], sensor_1: descriptors[1],
+        sensor_2: descriptors[2], sensor_3: descriptors[3],
+        sensor_4: descriptors[4], sensor_5: descriptors[5],
+        sensor_6: descriptors[6], sensor_7: descriptors[7],
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+/// Reads base and lid accelerometer x/y/z from EC memory.
+/// `lid_angle_degrees` is -1 when the EC reports the angle as unreliable, or
+/// when the platform has no lid accelerometer (Desktop, some FW16 configs).
+pub unsafe extern "C" fn framework_ec_get_accel_data(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkAccelDataResult {
+    let fail = |status| FrameworkAccelDataResult {
+        status,
+        lid_angle_degrees: -1,
+        reserved: [0; 2],
+        base_x: 0, base_y: 0, base_z: 0,
+        lid_x: 0, lid_y: 0, lid_z: 0,
+    };
+    let handle = match require_handle(handle) {
+        Ok(h) => h,
+        Err(s) => return fail(s),
+    };
+    controls::get_accel_data(&handle.ec).unwrap_or_else(|| fail(FrameworkStatus::with(FrameworkStatusCode::DataUnavailable, 0)))
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+/// Reads both ALS lux readings from EC memory (two 16-bit values at EC_MEMMAP_ALS).
+/// Returns 0 lux on platforms without an ALS sensor; the EC memory is zero in that case.
+pub unsafe extern "C" fn framework_ec_get_als_reading(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkAlsResult {
+    let fail = |status| FrameworkAlsResult { status, lux_0: 0, lux_1: 0 };
+    let handle = match require_handle(handle) {
+        Ok(h) => h,
+        Err(s) => return fail(s),
+    };
+    match controls::get_als(&handle.ec) {
+        Some((lux_0, lux_1)) => FrameworkAlsResult {
+            status: FrameworkStatus::success(),
+            lux_0,
+            lux_1,
+        },
+        None => fail(FrameworkStatus::with(FrameworkStatusCode::DataUnavailable, 0)),
     }
 }
 
