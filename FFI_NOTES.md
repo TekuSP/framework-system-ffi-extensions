@@ -107,6 +107,23 @@ the highest-value additions are likely:
 4. keyboard backlight and similar user-facing device controls
 5. a raw host-command escape hatch if fast parity matters more than a curated ABI
 
+## Submodule Update History
+
+### 2026-06-23: framework-system 993cb6b → 39f0f89 (v0.6.4)
+
+**Commits included:**
+
+- `73f38d8` --test: Fix issues on desktop (selftest PD handling for Desktop platform)
+- `5e6f4ef` --thermal: decode temp 4 (AMD Desktop adds "Virtual" sensor display)
+- `1cf031f` --pdports: Gracefully handle non-existent ports
+- `90e7d56` --thermal: Decode fan names (APU Fan, Left Fan, Right Fan, Front Fan, Third Fan)
+- `7bb3870` bump version to 0.6.4
+- `ab7fa58`, `58cd5ed`, `ce3abb7`, `39f0f89` contrib/README/doc changes only
+
+**FFI impact: none.** All code changes were in display/print helper functions (`print_thermal`, `get_and_print_cypd_pd_info`, `selftest`) which the FFI crate does not call. The `framework_lib` public API surface is unchanged. No new FFI bindings were required. Build, fmt, and clippy all pass cleanly after the update.
+
+The `Laptop 13 Pro (Intel Core Ultra Series 3)` SMBIOS string mapping (→ `Platform::IntelCoreUltra3`) was already present in the prior commit and already exposed in our FFI as `FrameworkPlatform::IntelCoreUltra3 = 12`.
+
 ## Learnings
 
 ### ABI Shape

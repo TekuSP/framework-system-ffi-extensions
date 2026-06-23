@@ -199,6 +199,18 @@ pub enum FrameworkFanState {
     Stalled = 2,
 }
 
+#[repr(u16)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkFanName {
+    Unknown = 0,
+    Generic = 1,
+    ApuFan = 2,
+    LeftFan = 3,
+    RightFan = 4,
+    FrontFan = 5,
+    ThirdFan = 6,
+}
+
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameworkFanFeaturesState {
@@ -213,7 +225,7 @@ pub enum FrameworkFanFeaturesState {
 pub struct FrameworkFanReading {
     pub state: FrameworkFanState,
     pub rpm: u16,
-    pub reserved: u16,
+    pub name: FrameworkFanName,
 }
 
 #[repr(C)]

@@ -290,6 +290,20 @@ Status of an individual fan reading.
 | `NotPresent` | `1` | Fan/channel does not exist. |
 | `Stalled` | `2` | Fan exists but appears stalled. |
 
+### `FrameworkFanName`
+
+Platform-specific role name for a fan slot.
+
+| Name | Value | Meaning |
+| --- | ---: | --- |
+| `Unknown` | `0` | Platform family could not be determined; slot role is indeterminate. |
+| `Generic` | `1` | Family known but no specific name assigned to this slot (shown as "Fan N" in CLI). |
+| `ApuFan` | `2` | Framework 12, 13, or Desktop first fan. |
+| `LeftFan` | `3` | Framework 16 left fan (slot 0). |
+| `RightFan` | `4` | Framework 16 right fan (slot 1). |
+| `FrontFan` | `5` | Framework Desktop front fan (slot 1). |
+| `ThirdFan` | `6` | Framework Desktop third fan (slot 2). |
+
 ### `FrameworkFanFeaturesState`
 
 Feature bitset-like enum describing available fan support.
@@ -309,7 +323,7 @@ One fan channel snapshot.
 | --- | --- | --- |
 | `state` | `FrameworkFanState` | Validity/state of the fan reading. |
 | `rpm` | `ushort` | Fan speed in RPM when `state == Ok`. |
-| `reserved` | `ushort` | Padding / future use. |
+| `name` | `FrameworkFanName` | Platform-specific role name for this fan slot. |
 
 ### `FrameworkThermalSnapshot`
 
