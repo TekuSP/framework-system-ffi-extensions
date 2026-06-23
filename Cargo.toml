@@ -1,6 +1,6 @@
 [package]
 name = "framework_lib_ffi"
-version = "0.3.0"
+version = "0.3.1"
 description = "Standalone native FFI surface for Framework System .NET interop"
 license = "MIT License"
 edition = "2021"
