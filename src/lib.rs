@@ -4,6 +4,7 @@ use framework_lib::smbios;
 
 mod abi_impls;
 mod byte_buffer;
+mod controls;
 mod gpu_descriptor;
 mod inventory;
 mod pd;
@@ -804,6 +805,52 @@ pub struct FrameworkChargeLimitsResult {
     pub reserved: [u8; 2],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkChassisIntrusionResult {
+    pub status: FrameworkStatus,
+    pub currently_open: u8,
+    pub coin_cell_ever_removed: u8,
+    pub ever_opened: u8,
+    pub total_opened: u8,
+    pub vtr_open_count: u8,
+    pub reserved: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcUptimeResult {
+    pub status: FrameworkStatus,
+    pub time_since_ec_boot_ms: u32,
+    pub ap_resets_since_ec_boot: u32,
+    pub ec_reset_flags: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkS0ixCounterResult {
+    pub status: FrameworkStatus,
+    pub s0ix_count: u32,
+    pub reserved: u32,
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkTabletModeOverride {
+    Default = 0,
+    ForceTablet = 1,
+    ForceClamshell = 2,
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkDeckStateMode {
+    ReadOnly = 0,
+    Required = 1,
+    ForceOn = 2,
+    ForceOff = 4,
+}
+
 #[no_mangle]
 pub extern "C" fn framework_ec_driver_is_supported(driver: FrameworkEcDriver) -> bool {
     runtime::driver_is_supported(driver)
@@ -1243,6 +1290,162 @@ pub unsafe extern "C" fn framework_ec_set_charge_limits(
     };
     match handle.ec.set_charge_limit(min_percent, max_percent) {
         Ok(()) => FrameworkStatus::success(),
+        Err(error) => status_from_error(error),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_chassis_intrusion(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkChassisIntrusionResult {
+    let fail = |status| FrameworkChassisIntrusionResult {
+        status,
+        currently_open: 0,
+        coin_cell_ever_removed: 0,
+        ever_opened: 0,
+        total_opened: 0,
+        vtr_open_count: 0,
+        reserved: [0; 3],
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match handle.ec.get_intrusion_status() {
+        Ok(s) => FrameworkChassisIntrusionResult {
+            status: FrameworkStatus::success(),
+            currently_open: u8::from(s.currently_open),
+            coin_cell_ever_removed: u8::from(s.coin_cell_ever_removed),
+            ever_opened: u8::from(s.ever_opened),
+            total_opened: s.total_opened,
+            vtr_open_count: s.vtr_open_count,
+            reserved: [0; 3],
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+/// Pass `battery_soc = -1` to apply the limit unconditionally; pass 0–100 to
+/// apply it only below that state-of-charge percentage.
+pub unsafe extern "C" fn framework_ec_set_charge_current_limit(
+    handle: *const FrameworkEcHandle,
+    current_ma: u32,
+    battery_soc: i32,
+) -> FrameworkStatus {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return status,
+    };
+    let soc = if battery_soc < 0 { None } else { Some(battery_soc as u32) };
+    match handle.ec.set_charge_current_limit(current_ma, soc) {
+        Ok(()) => FrameworkStatus::success(),
+        Err(error) => status_from_error(error),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_uptime(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcUptimeResult {
+    let fail = |status| FrameworkEcUptimeResult {
+        status,
+        time_since_ec_boot_ms: 0,
+        ap_resets_since_ec_boot: 0,
+        ec_reset_flags: 0,
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match controls::get_uptime(&handle.ec) {
+        Ok(info) => FrameworkEcUptimeResult {
+            status: FrameworkStatus::success(),
+            time_since_ec_boot_ms: info.time_since_ec_boot_ms,
+            ap_resets_since_ec_boot: info.ap_resets_since_ec_boot,
+            ec_reset_flags: info.ec_reset_flags,
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_s0ix_counter(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkS0ixCounterResult {
+    let fail = |status| FrameworkS0ixCounterResult { status, s0ix_count: 0, reserved: 0 };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match handle.ec.get_s0ix_counter() {
+        Ok(count) => FrameworkS0ixCounterResult {
+            status: FrameworkStatus::success(),
+            s0ix_count: count,
+            reserved: 0,
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_reset_s0ix_counter(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkStatus {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return status,
+    };
+    match handle.ec.reset_s0ix_counter() {
+        Ok(()) => FrameworkStatus::success(),
+        Err(error) => status_from_error(error),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+/// Returns `EcResponse(InvalidCommand)` on platforms without a tablet hinge sensor
+/// (Framework 16, Desktop).
+pub unsafe extern "C" fn framework_ec_set_tablet_mode(
+    handle: *const FrameworkEcHandle,
+    mode: FrameworkTabletModeOverride,
+) -> FrameworkStatus {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return status,
+    };
+    match controls::set_tablet_mode(&handle.ec, mode) {
+        Ok(()) => FrameworkStatus::success(),
+        Err(error) => status_from_error(error),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+/// Only meaningful on Framework 16. On other platforms the EC returns
+/// `EcResponse(InvalidCommand)`.
+pub unsafe extern "C" fn framework_ec_set_input_deck_mode(
+    handle: *const FrameworkEcHandle,
+    mode: FrameworkDeckStateMode,
+) -> FrameworkStatus {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return status,
+    };
+    match handle.ec.set_input_deck_mode(controls::into_deck_state_mode(mode)) {
+        Ok(_) => FrameworkStatus::success(),
         Err(error) => status_from_error(error),
     }
 }

@@ -88,6 +88,12 @@ control layer:
 - fingerprint LED readback and write (`Unknown`/`Custom` rejected; `Custom` is get-only per EC)
 - privacy switches read (microphone enabled, camera enabled)
 - battery charge limits read and write (min%, max%)
+- charge current limit set (mA, optional battery SoC threshold)
+- chassis intrusion read (currently open, ever opened, open count, VTR open count, coin cell removed)
+- EC uptime (ms since boot, AP reset count, EC reset flags)
+- S0ix counter read and reset
+- tablet mode override write (Framework 12/13; returns InvalidCommand on other platforms)
+- Framework 16 input deck mode write
 - expansion bay status snapshot
 - GPU descriptor header readback
 - raw GPU descriptor readback
@@ -110,7 +116,6 @@ Compared with the full `framework-system` repo and CLI, the major missing areas 
 
 ### Charger and Battery Controls
 
-- charge current limit (`set_charge_current_limit`)
 - charge rate limit
 - other charger-oriented control surfaces
 
@@ -118,7 +123,6 @@ Compared with the full `framework-system` repo and CLI, the major missing areas 
 
 - ambient light sensor values
 - accelerometer data and lid angle
-- intrusion switch state
 - stylus battery reporting
 - EC uptime and S0ix counters
 - board ID reporting
