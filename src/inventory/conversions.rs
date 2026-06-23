@@ -29,6 +29,20 @@ pub(crate) fn fingerprint_led_level(
     }
 }
 
+pub(crate) fn fp_led_brightness_level(
+    level: FrameworkFingerprintLedLevel,
+) -> Option<FpLedBrightnessLevel> {
+    match level {
+        FrameworkFingerprintLedLevel::High => Some(FpLedBrightnessLevel::High),
+        FrameworkFingerprintLedLevel::Medium => Some(FpLedBrightnessLevel::Medium),
+        FrameworkFingerprintLedLevel::Low => Some(FpLedBrightnessLevel::Low),
+        FrameworkFingerprintLedLevel::UltraLow => Some(FpLedBrightnessLevel::UltraLow),
+        FrameworkFingerprintLedLevel::Auto => Some(FpLedBrightnessLevel::Auto),
+        // Custom is get-only per EC protocol; Unknown is not a valid set target
+        FrameworkFingerprintLedLevel::Custom | FrameworkFingerprintLedLevel::Unknown => None,
+    }
+}
+
 pub(super) fn expansion_bay_board(
     board: Result<ExpansionBayBoard, ExpansionBayIssue>,
 ) -> FrameworkExpansionBayBoard {

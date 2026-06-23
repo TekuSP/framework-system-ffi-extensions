@@ -84,8 +84,10 @@ control layer:
 - fan duty control
 - restore automatic fan control
 - compact EC feature flags for common presence/control checks
-- keyboard backlight readback
-- fingerprint LED readback
+- keyboard backlight readback and write
+- fingerprint LED readback and write (`Unknown`/`Custom` rejected; `Custom` is get-only per EC)
+- privacy switches read (microphone enabled, camera enabled)
+- battery charge limits read and write (min%, max%)
 - expansion bay status snapshot
 - GPU descriptor header readback
 - raw GPU descriptor readback
@@ -108,8 +110,7 @@ Compared with the full `framework-system` repo and CLI, the major missing areas 
 
 ### Charger and Battery Controls
 
-- battery charge limit
-- charge current limit
+- charge current limit (`set_charge_current_limit`)
 - charge rate limit
 - other charger-oriented control surfaces
 
@@ -117,7 +118,6 @@ Compared with the full `framework-system` repo and CLI, the major missing areas 
 
 - ambient light sensor values
 - accelerometer data and lid angle
-- privacy switch state
 - intrusion switch state
 - stylus battery reporting
 - EC uptime and S0ix counters

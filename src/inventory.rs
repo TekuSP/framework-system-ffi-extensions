@@ -7,7 +7,7 @@ mod query;
 mod usb_slots;
 
 pub(crate) use builder::build_module_inventory;
-pub(crate) use conversions::fingerprint_led_level;
+pub(crate) use conversions::{fingerprint_led_level, fp_led_brightness_level};
 pub(crate) use defaults::{
     default_expansion_bay_status, default_expansion_bay_status_result,
     default_feature_flags_result, default_fingerprint_led_result,

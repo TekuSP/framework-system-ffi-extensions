@@ -786,6 +786,24 @@ pub struct FrameworkEcModuleInventoryResult {
     pub inventory: FrameworkModuleInventory,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkPrivacySwitchesResult {
+    pub status: FrameworkStatus,
+    pub microphone_enabled: u8,
+    pub camera_enabled: u8,
+    pub reserved: [u8; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkChargeLimitsResult {
+    pub status: FrameworkStatus,
+    pub min_percent: u8,
+    pub max_percent: u8,
+    pub reserved: [u8; 2],
+}
+
 #[no_mangle]
 pub extern "C" fn framework_ec_driver_is_supported(driver: FrameworkEcDriver) -> bool {
     runtime::driver_is_supported(driver)
@@ -1114,6 +1132,118 @@ pub unsafe extern "C" fn framework_ec_get_fingerprint_led(
             0,
             FrameworkFingerprintLedLevel::Unknown,
         ),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_set_keyboard_backlight(
+    handle: *const FrameworkEcHandle,
+    percent: u8,
+) -> FrameworkStatus {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return status,
+    };
+    if percent > 100 {
+        return FrameworkStatus::with(FrameworkStatusCode::InvalidArgument, 0);
+    }
+    handle.ec.set_keyboard_backlight(percent);
+    FrameworkStatus::success()
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+/// `level` must be a valid `FrameworkFingerprintLedLevel` variant. `Unknown` and `Custom`
+/// are rejected with `InvalidArgument` — `Custom` is a get-only level per the EC protocol.
+pub unsafe extern "C" fn framework_ec_set_fingerprint_led(
+    handle: *const FrameworkEcHandle,
+    level: FrameworkFingerprintLedLevel,
+) -> FrameworkStatus {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return status,
+    };
+    let Some(led_level) = inventory::fp_led_brightness_level(level) else {
+        return FrameworkStatus::with(FrameworkStatusCode::InvalidArgument, 0);
+    };
+    match handle.ec.set_fp_led_level(led_level) {
+        Ok(()) => FrameworkStatus::success(),
+        Err(error) => status_from_error(error),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_privacy_switches(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkPrivacySwitchesResult {
+    let fail = |status| FrameworkPrivacySwitchesResult {
+        status,
+        microphone_enabled: 0,
+        camera_enabled: 0,
+        reserved: [0; 2],
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match handle.ec.get_privacy_info() {
+        Ok((mic, cam)) => FrameworkPrivacySwitchesResult {
+            status: FrameworkStatus::success(),
+            microphone_enabled: u8::from(mic),
+            camera_enabled: u8::from(cam),
+            reserved: [0; 2],
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_charge_limits(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkChargeLimitsResult {
+    let fail = |status| FrameworkChargeLimitsResult {
+        status,
+        min_percent: 0,
+        max_percent: 0,
+        reserved: [0; 2],
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match handle.ec.get_charge_limit() {
+        Ok((min, max)) => FrameworkChargeLimitsResult {
+            status: FrameworkStatus::success(),
+            min_percent: min,
+            max_percent: max,
+            reserved: [0; 2],
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_set_charge_limits(
+    handle: *const FrameworkEcHandle,
+    min_percent: u8,
+    max_percent: u8,
+) -> FrameworkStatus {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return status,
+    };
+    match handle.ec.set_charge_limit(min_percent, max_percent) {
+        Ok(()) => FrameworkStatus::success(),
+        Err(error) => status_from_error(error),
     }
 }
 
