@@ -576,6 +576,13 @@ Best-effort classification for a detected module or slot occupant.
 | `ExpansionBayAmdGpu` | `19` | Expansion bay AMD GPU module. |
 | `ExpansionBayNvidiaGpu` | `20` | Expansion bay NVIDIA GPU module. |
 | `ExpansionBayFanOnly` | `21` | Expansion bay fan-only module. |
+| `UsbAExpansionCard` | `22` | USB-A expansion card (USB hub). |
+| `UsbCExpansionCard` | `23` | USB-C expansion card (passive passthrough). |
+| `EthernetExpansionCard` | `24` | Ethernet 2.5G expansion card (Realtek RTL8156B). |
+| `Ethernet10GExpansionCard` | `25` | Ethernet 10G expansion card (WisdPi, chip TBD). |
+| `MicroSdExpansionCard` | `26` | MicroSD expansion card. |
+| `SdExpansionCard` | `27` | Full-size SD expansion card. |
+| `SsdExpansionCard` | `28` | NVMe storage expansion card (250GB 2nd Gen, 1TB 1st Gen). |
 
 ### `FrameworkModuleBus`
 
@@ -602,6 +609,73 @@ Logical slot/category a module belongs to.
 | `ExpansionBay` | `4` | Expansion bay slot. |
 | `InternalFixed` | `5` | Built-in fixed internal component. |
 | `Detached` | `6` | Observed device not confidently mapped to a fixed slot. |
+| `UsbCExpansionCardSlot` | `7` | Numbered Framework expansion card slot (slots 0–5 in the inventory). |
+
+### `FrameworkExpansionCardType`
+
+Discriminant for the type of card plugged into a USB-C expansion card slot.
+
+| Name | Value | Meaning |
+| --- | ---: | --- |
+| `Unknown` | `0` | Card type could not be determined. |
+| `DisplayPort` | `1` | DisplayPort expansion card. |
+| `Hdmi` | `2` | HDMI expansion card. |
+| `Audio` | `3` | Audio expansion card. |
+| `UsbA` | `4` | USB-A expansion card. |
+| `UsbC` | `5` | USB-C expansion card (passive passthrough). |
+| `Ethernet` | `6` | Ethernet 2.5G expansion card (Realtek RTL8156B). |
+| `Ethernet10G` | `7` | Ethernet 10G expansion card (WisdPi, chip TBD). |
+| `MicroSd` | `8` | MicroSD expansion card. |
+| `Sd` | `9` | Full-size SD expansion card. |
+| `Ssd` | `10` | NVMe storage expansion card. |
+
+### `FrameworkPdTypeCState`
+
+USB Type-C physical connection state.
+
+| Name | Value | Meaning |
+| --- | ---: | --- |
+| `Nothing` | `0` | No connection. |
+| `Sink` | `1` | UFP/sink role. |
+| `Source` | `2` | DFP/source role. |
+| `Debug` | `3` | Debug accessory mode. |
+| `Audio` | `4` | Audio accessory mode. |
+| `PoweredAccessory` | `5` | Powered accessory mode. |
+| `Unsupported` | `6` | Unsupported state. |
+| `Invalid` | `7` | Unrecognized EC state value. |
+
+### `FrameworkPdPowerRole`
+
+USB PD power role.
+
+| Name | Value | Meaning |
+| --- | ---: | --- |
+| `Sink` | `0` | Consuming power. |
+| `Source` | `1` | Providing power. |
+| `Unknown` | `2` | Role could not be determined. |
+
+### `FrameworkPdDataRole`
+
+USB PD data role.
+
+| Name | Value | Meaning |
+| --- | ---: | --- |
+| `Ufp` | `0` | Upstream Facing Port (device). |
+| `Dfp` | `1` | Downstream Facing Port (host). |
+| `Disconnected` | `2` | Data disconnected. |
+| `Unknown` | `3` | Role could not be determined. |
+
+### `FrameworkPdCcPolarity`
+
+USB-C CC pin orientation / debug-accessory mode.
+
+| Name | Value | Meaning |
+| --- | ---: | --- |
+| `Unknown` | `-1` | Polarity could not be determined. |
+| `Cc1` | `0` | CC1 active (normal orientation). |
+| `Cc2` | `1` | CC2 active (flipped orientation). |
+| `Cc1Debug` | `2` | Debug accessory on CC1. |
+| `Cc2Debug` | `3` | Debug accessory on CC2. |
 
 ### `FrameworkModuleConfidence`
 
@@ -746,9 +820,51 @@ Compact description of one detected or inferred module/slot occupant.
 | `product_id` | `uint` | Observed product ID when available; otherwise usually zero. |
 | `board_id` | `int` | Board/module-specific numeric identifier when available. |
 
+### `FrameworkEcPdPortState`
+
+Full USB PD port state from the EC (28 bytes). Embedded as a named field inside `FrameworkExpansionCardModuleDescriptor`.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `c_state` | `FrameworkPdTypeCState` | Physical USB Type-C connection state. |
+| `power_role` | `FrameworkPdPowerRole` | PD power role (sink/source). |
+| `data_role` | `FrameworkPdDataRole` | PD data role (UFP/DFP). |
+| `cc_polarity` | `FrameworkPdCcPolarity` | CC pin orientation. |
+| `voltage_mv` | `ushort` | Negotiated voltage in millivolts. |
+| `current_ma` | `ushort` | Negotiated current in milliamps. |
+| `has_pd_contract` | `byte` | Bool-like byte; non-zero if a PD contract is active. |
+| `vconn_active` | `byte` | Bool-like byte; non-zero if VCONN is active. |
+| `epr_active` | `byte` | Bool-like byte; non-zero if EPR (Extended Power Range) is active. |
+| `epr_support` | `byte` | Bool-like byte; non-zero if the port supports EPR. |
+| `active_port` | `byte` | Bool-like byte; non-zero if this port is the active port. |
+| `alt_mode_flags` | `byte` | Raw EC alt-mode status bits (bit 0: DP/TBT DFP_D, bit 1: UFP_D, bit 2: Power Low, bit 3: Enabled, bit 4: Multi-Function, bit 5: USB Config, bit 6: Exit Request, bit 7: HPD High). |
+| `reserved` | `byte[2]` | Padding / future use. |
+
+### `FrameworkExpansionCardModuleDescriptor`
+
+Flat descriptor for one of the six numbered expansion card slots (64 bytes). All fields from `FrameworkModuleDescriptor` are inlined directly — no `@base` chain. `pd` is a coherent named sub-struct; all other fields are primitives/enums.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `identity` | `FrameworkModuleIdentity` | Best-effort module classification. |
+| `bus` | `FrameworkModuleBus` | Which source/bus produced the observation. |
+| `slot_kind` | `FrameworkModuleSlotKind` | Always `UsbCExpansionCardSlot` for populated slots. |
+| `confidence` | `FrameworkModuleConfidence` | Confidence in the slot-assignment (how sure we are which physical slot this is). |
+| `present` | `byte` | Bool-like byte; non-zero if the slot appears populated. |
+| `reserved_0` | `byte[3]` | Padding / future use. |
+| `slot_index` | `int` | Zero-based slot index (0–5). |
+| `flags` | `uint` | Bitwise OR of `FrameworkModuleFlag` values. |
+| `vendor_id` | `uint` | Observed USB/HID vendor ID when available. |
+| `product_id` | `uint` | Observed USB/HID product ID when available. |
+| `board_id` | `int` | Board-specific identifier when available; otherwise `-1`. |
+| `pd` | `FrameworkEcPdPortState` | Full PD port state for this slot. |
+| `card_type` | `FrameworkExpansionCardType` | Identified card type. |
+| `card_confidence` | `FrameworkModuleConfidence` | Confidence in the card-type identification (independent of slot-assignment confidence). |
+| `reserved` | `byte` | Padding / future use. |
+
 ### `FrameworkModuleInventory`
 
-Fixed-size inventory snapshot covering known slot categories.
+Fixed-size inventory snapshot covering all known slot categories. Expansion card slots use `FrameworkExpansionCardModuleDescriptor` (flat, 64 bytes each with PD state and card type). All other slots use `FrameworkModuleDescriptor` directly (32 bytes each) — the `slot_kind` field distinguishes them semantically.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -756,16 +872,16 @@ Fixed-size inventory snapshot covering known slot categories.
 | `input_top_row_count` | `byte` | Number of meaningful top-row/input deck entries in `input_top_row_0` ... `input_top_row_4`. |
 | `detached_count` | `byte` | Number of meaningful detached entries in `detached_0` ... `detached_3`. |
 | `reserved_0` | `byte` | Padding / future use. |
-| `usb_c_slot_0` ... `usb_c_slot_5` | `FrameworkModuleDescriptor` | Per-USB-C-slot module descriptors. |
-| `input_top_row_0` ... `input_top_row_4` | `FrameworkModuleDescriptor` | Framework 16 top-row/input module positions. |
-| `input_touchpad` | `FrameworkModuleDescriptor` | Framework 16 touchpad/input deck descriptor. |
-| `internal_keyboard` | `FrameworkModuleDescriptor` | Built-in keyboard descriptor. |
-| `internal_touchpad` | `FrameworkModuleDescriptor` | Built-in touchpad descriptor. |
-| `fingerprint_reader` | `FrameworkModuleDescriptor` | Fingerprint reader descriptor. |
-| `touchscreen` | `FrameworkModuleDescriptor` | Touchscreen descriptor. |
-| `webcam` | `FrameworkModuleDescriptor` | Webcam descriptor. |
-| `expansion_bay` | `FrameworkModuleDescriptor` | Expansion bay descriptor. |
-| `detached_0` ... `detached_3` | `FrameworkModuleDescriptor` | Observed devices/modules that could not be mapped to a fixed slot with confidence. |
+| `usb_c_slot_0` ... `usb_c_slot_5` | `FrameworkExpansionCardModuleDescriptor` | Per-expansion-card-slot descriptors; includes all module fields, PD state, and card type. |
+| `input_top_row_0` ... `input_top_row_4` | `FrameworkModuleDescriptor` | Framework 16 top-row/input module positions (`slot_kind = InputDeckTopRow`). |
+| `input_touchpad` | `FrameworkModuleDescriptor` | Framework 16 touchpad/input deck descriptor (`slot_kind = InputDeckTouchpad`). |
+| `internal_keyboard` | `FrameworkModuleDescriptor` | Built-in keyboard (`slot_kind = InternalFixed`). |
+| `internal_touchpad` | `FrameworkModuleDescriptor` | Built-in touchpad (`slot_kind = InternalFixed`). |
+| `fingerprint_reader` | `FrameworkModuleDescriptor` | Fingerprint reader (`slot_kind = InternalFixed`). |
+| `touchscreen` | `FrameworkModuleDescriptor` | Touchscreen (`slot_kind = InternalFixed`). |
+| `webcam` | `FrameworkModuleDescriptor` | Webcam (`slot_kind = InternalFixed`). |
+| `expansion_bay` | `FrameworkModuleDescriptor` | Expansion bay (`slot_kind = ExpansionBay`). |
+| `detached_0` ... `detached_3` | `FrameworkModuleDescriptor` | Observed devices not confidently mapped to a fixed slot (`slot_kind = Detached`). |
 
 ### `FrameworkEcModuleInventoryResult`
 

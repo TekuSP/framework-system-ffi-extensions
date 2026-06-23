@@ -3,7 +3,7 @@ use framework_lib::smbios::{self, PlatformFamily};
 use crate::*;
 
 use super::conversions::{expansion_bay_identity, module_descriptor, module_flag};
-use super::defaults::default_module_descriptor;
+use super::defaults::{default_expansion_card_module_descriptor, default_module_descriptor};
 use super::internals::detect_internal_modules;
 use super::query::expansion_bay_status;
 use super::usb_slots::{populate_usb_slots, MAX_USB_C_SLOT_COUNT};
@@ -43,7 +43,7 @@ fn build_expansion_bay_module(handle: &FrameworkEcHandle) -> FrameworkModuleDesc
 }
 
 pub(crate) fn build_module_inventory(handle: &FrameworkEcHandle) -> FrameworkModuleInventory {
-    let mut usb_slots = [default_module_descriptor(); MAX_USB_C_SLOT_COUNT];
+    let mut usb_slots = [default_expansion_card_module_descriptor(); MAX_USB_C_SLOT_COUNT];
     let mut detached = [default_module_descriptor(); 4];
     let mut detached_count = 0u8;
 

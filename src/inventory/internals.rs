@@ -115,6 +115,7 @@ pub(super) fn detect_internal_modules(
     let touchpad_devices = detect_touchpads_local();
     if family == Some(PlatformFamily::Framework16) {
         if let Some(device) = touchpad_devices.first() {
+            let board_id = input_touchpad.board_id;
             input_touchpad = module_descriptor(
                 FrameworkModuleIdentity::Framework16TouchpadModule,
                 FrameworkModuleBus::Hid,
@@ -125,7 +126,7 @@ pub(super) fn detect_internal_modules(
                 module_flag(FrameworkModuleFlag::Connected),
                 device.vendor_id as u32,
                 device.product_id as u32,
-                input_touchpad.board_id,
+                board_id,
             );
         }
     } else {
@@ -165,8 +166,7 @@ pub(super) fn detect_internal_modules(
                 confidence,
                 true,
                 -1,
-                module_flag(FrameworkModuleFlag::BuiltIn)
-                    | module_flag(FrameworkModuleFlag::Connected),
+                module_flag(FrameworkModuleFlag::BuiltIn) | module_flag(FrameworkModuleFlag::Connected),
                 vendor_id,
                 product_id,
                 board_id,

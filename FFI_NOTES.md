@@ -5,6 +5,70 @@ This document tracks two things:
 - the main feature gaps between `framework-system` and this standalone FFI facade
 - the practical lessons learned while shaping the ABI for `csbindgen` and .NET
 
+## Detection Reference
+
+Complete list of every device the module inventory can detect, the exact VID:PID matched,
+the detection method, and the confidence assigned. All VID:PIDs are matched from first
+principles in `src/inventory/detect.rs` unless noted as upstream (sourced from `framework_lib`).
+
+### Expansion Card Slots
+
+Slot assignment uses a correlation pass: if exactly N of a card type are detected via USB/HID
+and exactly N expansion card slots are unassigned and connected (no other match), the cards
+are assigned to those slots with the confidence shown. Otherwise all detected cards go to
+`detached`. `Direct` passes run before `DerivedWeak` passes so a higher-confidence match
+locks a slot before a weaker pass can claim it.
+
+| Card | VID:PID(s) | Chip / Origin | Detection bus | Confidence | Notes |
+| --- | --- | --- | --- | --- | --- |
+| DisplayPort (1st Gen) | `0x32AC:0x0003` | Cypress CCG3 | HID (upstream `ccgx::hid`) | **Direct** | Framework VID; DP firmware string |
+| HDMI (1st Gen) | `0x32AC:0x0002` | Cypress CCG3 | HID (upstream `ccgx::hid`) | **Direct** | Framework VID; HDMI firmware string |
+| DisplayPort (2nd Gen) | — | Passive DP alt-mode passthrough | EC `alt_mode_flags` bit 0/1 | **DerivedWeak** | No USB device; cannot distinguish from HDMI 3rd Gen |
+| HDMI (3rd Gen) | — | Parade PS186 | EC `alt_mode_flags` bit 0/1 | **DerivedWeak** | No USB device; cannot distinguish from DP 2nd Gen |
+| Audio | `0x32AC:0x0010` | Framework firmware | USB (upstream `audio_card`) | **Direct** | Framework VID + unique PID; unambiguous |
+| Storage (1TB 1st Gen, 250GB 2nd Gen) | `0x32AC:0x0005` | Framework firmware | USB (`detect_ssd_cards_local`) | **Direct** | Framework VID + unique PID; covers both generations |
+| USB-A (1st/2nd Gen) | `0x0BDA:0x5432` | Realtek RTL8153 | USB (`detect_usb_a_cards_local`) | **DerivedWeak** | Generic hub chip; appears in non-card contexts |
+| USB-A (1st/2nd Gen) | `0x0BDA:0x5424` | Realtek RTL8153 | USB (`detect_usb_a_cards_local`) | **DerivedWeak** | Generic hub chip; appears in non-card contexts |
+| USB-A (1st/2nd Gen) | `0x05E3:0x0625` | Genesys Logic GL3590 | USB (`detect_usb_a_cards_local`) | **DerivedWeak** | Generic hub chip; appears in non-card contexts |
+| Ethernet 2.5G | `0x0BDA:0x8156` | Realtek RTL8156B | USB (`detect_ethernet_cards_local`) | **DerivedWeak** | NIC chip; appears in USB-C docks |
+| SD (full-size) | `0x05E3:0x0749` | Genesys Logic GL3230 | USB (`detect_sd_cards_local`) | **DerivedWeak** | Card reader chip; unverified on real hardware |
+| MicroSD | `0x05E3:0x0751` | Genesys Logic | USB (`detect_microsd_cards_local`) | **DerivedWeak** | Card reader chip; unverified on real hardware |
+| USB-C (all colors) | — | Passive passthrough | None | **Unknown** | No USB device; no distinguishing EC signal |
+| Ethernet 10G (WisdPi) | — | Chip TBD | None | **Unknown** | Not yet shipping; no known VID:PID |
+
+### Internal Components
+
+Internal components are assigned directly to named inventory fields (not via slot correlation).
+No slot-assignment uncertainty exists — the inventory field name is the type tag.
+
+| Component | VID:PID | Chip / Origin | Detection bus | Confidence | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Internal keyboard (FW13/12/Desktop) | — | — | EC `EcFeatureCode::Keyboard` | **DerivedStrong** | No USB ID; feature flag only |
+| Internal touchpad (FW13/12/Desktop) | `0x093A:0x0274` | PixArt | HID (usage page `0xFF00`) | **Direct** | |
+| Internal touchpad (FW13/12/Desktop) | `0x093A:0x0239` | PixArt | HID (usage page `0xFF00`) | **Direct** | |
+| Internal touchpad (FW13/12/Desktop) | `0x093A:0x0360` | PixArt | HID (usage page `0xFF00`) | **Direct** | |
+| Internal touchpad (FW13/12/Desktop) | `0x093A:0x0343` | PixArt | HID (usage page `0xFF00`) | **Direct** | |
+| FW16 touchpad module | same as above | PixArt | HID + board ID from EC | **Direct** | Board ID read via EC `BoardIdType::Touchpad` |
+| FW16 top-row keyboard modules | `0x32AC:0x0012` … `0x0019`, `0x0030` | Framework firmware | USB + physical port numbers | **Direct** | Port numbers `[4,2]`–`[3,3]` map to top-row slots 0–4 |
+| FW16 LED matrix module | `0x32AC:0x0020` | Framework firmware | USB + physical port numbers | **Direct** | Same port-number mapping as keyboard modules |
+| FW16 input deck (EC path) | — | — | EC `get_input_deck_status()` | **Direct** | Gives module type + touchpad board ID per slot |
+| Fingerprint reader | — | — | EC `EcFeatureCode::Fingerprint` | **DerivedStrong** | Feature flag only |
+| Fingerprint reader (with LED) | — | — | EC `get_fp_led_level()` | **Direct** | LED readback confirms reader is present and active |
+| Touchscreen (ILI Technology) | `0x222A:0x5539` | ILI Technology | HID (usage page `0xFF00`, upstream `touchscreen`) | **Direct** | |
+| Touchscreen (Himax HX) | `0x3558:0x14FD` | Himax | HID (upstream `touchscreen`) | **Direct** | |
+| Webcam (FW13/16 2nd Gen) | `0x32AC:0x001C` | Framework firmware | USB (upstream `camera`) | **Direct** | Framework VID + unique PID |
+| Webcam (FW12) | `0x32AC:0x001D` | Framework firmware | USB (upstream `camera`) | **Direct** | Framework VID + unique PID |
+
+### Expansion Bay
+
+The expansion bay is detected via a single EC command rather than USB/HID enumeration.
+
+| Slot | VID:PID | Detection method | Confidence | Notes |
+| --- | --- | --- | --- | --- |
+| Expansion bay | — | EC `get_expansion_bay_status()` | **Direct** | Returns board type, vendor, PCIe config, fault/door state |
+
+---
+
 ## Current Scope
 
 The current FFI covers the main building blocks needed for a .NET thermal and fan
@@ -26,7 +90,9 @@ control layer:
 - GPU descriptor header readback
 - raw GPU descriptor readback
 - GPU descriptor validation against caller-provided full descriptor bytes
-- unified module inventory snapshot with best-effort detection for USB-C cards,
+- unified module inventory snapshot with best-effort detection for USB-C expansion cards
+  (DP/HDMI via HID, Audio/SSD via USB VID:PID, USB-A/Ethernet/SD/MicroSD via USB hub
+  chip PIDs), PD port state per slot (voltage, current, power role, data role, alt-mode),
   Framework 16 input modules, touchpad, fingerprint reader, touchscreen, webcam,
   and expansion bay presence
 - structured status and device error reporting
@@ -59,10 +125,11 @@ Compared with the full `framework-system` repo and CLI, the major missing areas 
 
 ### USB-C and PD Management
 
-- PD port state details
 - PD controller information
 - PD reset/disable/enable operations
 - Chromebook-style PD info surfaces
+- USB-C expansion card VID/PID confirmation: SD (`0x05E3:0x0749`) and MicroSD (`0x05E3:0x0751`) PIDs are Genesys Logic reader candidates; confidence is DerivedWeak pending hardware testing against actual Framework cards
+- USB-C passive cards (USB-C expansion card, DP 2nd Gen passthrough, HDMI 3rd Gen Parade PS186) have no USB presence; they remain Unknown/DerivedWeak with no slot disambiguation path currently
 
 ### Device and Platform Controls
 
@@ -142,6 +209,15 @@ The `Laptop 13 Pro (Intel Core Ultra Series 3)` SMBIOS string mapping (→ `Plat
 - Fixed-size byte arrays generate as C# `fixed byte[...]` buffers, which works well
   for truly binary fixed-layout metadata such as GPU descriptor `magic` and `serial`
   fields but is still a poor fit for general-purpose strings.
+- **Flat independent structs over C-inheritance chains.** The C first-field casting
+  idiom (`base` as first field) produces deep `@base.@base.@base.field` chains in C#
+  that `@` escape a reserved keyword and break every access path. .NET best practice
+  for FFI is flat, independent structs: inline shared fields directly, use a coherent
+  named sub-struct only where the sub-struct is a meaningful semantic group (e.g.
+  `FrameworkEcPdPortState pd`). Slot types with no extra data beyond `FrameworkModuleDescriptor`
+  use `FrameworkModuleDescriptor` directly; the `slot_kind` field carries the semantic
+  type tag. The managed layer provides typed records/classes via `typeof`/`is`, not
+  the FFI structs.
 
 ### Strings and Ownership
 

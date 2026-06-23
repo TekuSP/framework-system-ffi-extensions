@@ -98,6 +98,22 @@ pub(super) fn expansion_card_identity(product_id: u16) -> FrameworkModuleIdentit
     }
 }
 
+pub(super) fn expansion_card_type(identity: FrameworkModuleIdentity) -> FrameworkExpansionCardType {
+    match identity {
+        FrameworkModuleIdentity::DpExpansionCard => FrameworkExpansionCardType::DisplayPort,
+        FrameworkModuleIdentity::HdmiExpansionCard => FrameworkExpansionCardType::Hdmi,
+        FrameworkModuleIdentity::AudioExpansionCard => FrameworkExpansionCardType::Audio,
+        FrameworkModuleIdentity::UsbAExpansionCard => FrameworkExpansionCardType::UsbA,
+        FrameworkModuleIdentity::UsbCExpansionCard => FrameworkExpansionCardType::UsbC,
+        FrameworkModuleIdentity::EthernetExpansionCard => FrameworkExpansionCardType::Ethernet,
+        FrameworkModuleIdentity::Ethernet10GExpansionCard => FrameworkExpansionCardType::Ethernet10G,
+        FrameworkModuleIdentity::MicroSdExpansionCard => FrameworkExpansionCardType::MicroSd,
+        FrameworkModuleIdentity::SdExpansionCard => FrameworkExpansionCardType::Sd,
+        FrameworkModuleIdentity::SsdExpansionCard => FrameworkExpansionCardType::Ssd,
+        _ => FrameworkExpansionCardType::Unknown,
+    }
+}
+
 pub(super) fn framework16_top_row_identity(product_id: u16) -> FrameworkModuleIdentity {
     if product_id == inputmodule::LEDMATRIX_PID {
         FrameworkModuleIdentity::Framework16LedMatrix

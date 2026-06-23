@@ -6,6 +6,7 @@ mod abi_impls;
 mod byte_buffer;
 mod gpu_descriptor;
 mod inventory;
+mod pd;
 mod results;
 mod runtime;
 mod status;
@@ -494,6 +495,13 @@ pub enum FrameworkModuleIdentity {
     ExpansionBayAmdGpu = 19,
     ExpansionBayNvidiaGpu = 20,
     ExpansionBayFanOnly = 21,
+    UsbAExpansionCard = 22,
+    UsbCExpansionCard = 23,
+    EthernetExpansionCard = 24,
+    Ethernet10GExpansionCard = 25,
+    MicroSdExpansionCard = 26,
+    SdExpansionCard = 27,
+    SsdExpansionCard = 28,
 }
 
 #[repr(u8)]
@@ -516,6 +524,7 @@ pub enum FrameworkModuleSlotKind {
     ExpansionBay = 4,
     InternalFixed = 5,
     Detached = 6,
+    UsbCExpansionCardSlot = 7,
 }
 
 #[repr(u8)]
@@ -629,6 +638,80 @@ pub struct FrameworkEcGpuDescriptorValidationResult {
     pub reserved: [u8; 3],
 }
 
+#[repr(u16)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkExpansionCardType {
+    Unknown = 0,
+    DisplayPort = 1,
+    Hdmi = 2,
+    Audio = 3,
+    UsbA = 4,
+    UsbC = 5,
+    Ethernet = 6,
+    Ethernet10G = 7,
+    MicroSd = 8,
+    Sd = 9,
+    Ssd = 10,
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkPdTypeCState {
+    Nothing = 0,
+    Sink = 1,
+    Source = 2,
+    Debug = 3,
+    Audio = 4,
+    PoweredAccessory = 5,
+    Unsupported = 6,
+    Invalid = 7,
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkPdPowerRole {
+    Sink = 0,
+    Source = 1,
+    Unknown = 2,
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkPdDataRole {
+    Ufp = 0,
+    Dfp = 1,
+    Disconnected = 2,
+    Unknown = 3,
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkPdCcPolarity {
+    Unknown = -1,
+    Cc1 = 0,
+    Cc2 = 1,
+    Cc1Debug = 2,
+    Cc2Debug = 3,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameworkEcPdPortState {
+    pub c_state: FrameworkPdTypeCState,
+    pub power_role: FrameworkPdPowerRole,
+    pub data_role: FrameworkPdDataRole,
+    pub cc_polarity: FrameworkPdCcPolarity,
+    pub voltage_mv: u16,
+    pub current_ma: u16,
+    pub has_pd_contract: u8,
+    pub vconn_active: u8,
+    pub epr_active: u8,
+    pub epr_support: u8,
+    pub active_port: u8,
+    pub alt_mode_flags: u8,
+    pub reserved: [u8; 2],
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameworkModuleDescriptor {
@@ -647,17 +730,37 @@ pub struct FrameworkModuleDescriptor {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameworkExpansionCardModuleDescriptor {
+    pub identity: FrameworkModuleIdentity,
+    pub bus: FrameworkModuleBus,
+    pub slot_kind: FrameworkModuleSlotKind,
+    pub confidence: FrameworkModuleConfidence,
+    pub present: u8,
+    pub reserved_0: [u8; 3],
+    pub slot_index: i32,
+    pub flags: u32,
+    pub vendor_id: u32,
+    pub product_id: u32,
+    pub board_id: i32,
+    pub pd: FrameworkEcPdPortState,
+    pub card_type: FrameworkExpansionCardType,
+    pub card_confidence: FrameworkModuleConfidence,
+    pub reserved: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameworkModuleInventory {
     pub usb_c_slot_count: u8,
     pub input_top_row_count: u8,
     pub detached_count: u8,
     pub reserved_0: u8,
-    pub usb_c_slot_0: FrameworkModuleDescriptor,
-    pub usb_c_slot_1: FrameworkModuleDescriptor,
-    pub usb_c_slot_2: FrameworkModuleDescriptor,
-    pub usb_c_slot_3: FrameworkModuleDescriptor,
-    pub usb_c_slot_4: FrameworkModuleDescriptor,
-    pub usb_c_slot_5: FrameworkModuleDescriptor,
+    pub usb_c_slot_0: FrameworkExpansionCardModuleDescriptor,
+    pub usb_c_slot_1: FrameworkExpansionCardModuleDescriptor,
+    pub usb_c_slot_2: FrameworkExpansionCardModuleDescriptor,
+    pub usb_c_slot_3: FrameworkExpansionCardModuleDescriptor,
+    pub usb_c_slot_4: FrameworkExpansionCardModuleDescriptor,
+    pub usb_c_slot_5: FrameworkExpansionCardModuleDescriptor,
     pub input_top_row_0: FrameworkModuleDescriptor,
     pub input_top_row_1: FrameworkModuleDescriptor,
     pub input_top_row_2: FrameworkModuleDescriptor,
