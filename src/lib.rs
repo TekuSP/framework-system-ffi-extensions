@@ -743,6 +743,30 @@ pub struct FrameworkEcPdPortState {
     pub reserved: [u8; 2],
 }
 
+/// Physical position of an input-deck module on Framework Laptop 16 (the 8-wide input-deck MUX). Mirrors the
+/// native <c>chromium_ec::input_deck::InputDeckMux</c> slots; <c>Unknown</c> for any module that is not
+/// input-deck-mounted or on platforms that do not report a deck position.
+#[repr(u16)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkInputModulePosition {
+    /// Not an input-deck-mounted module, or the platform reports no deck position.
+    Unknown = 0,
+    /// Top-row slot 0 (far left).
+    TopRow0 = 1,
+    /// Top-row slot 1.
+    TopRow1 = 2,
+    /// Top-row slot 2.
+    TopRow2 = 3,
+    /// Top-row slot 3.
+    TopRow3 = 4,
+    /// Top-row slot 4 (far right).
+    TopRow4 = 5,
+    /// Touchpad in the lower section.
+    Touchpad = 6,
+    /// The hub board all input modules connect through.
+    HubBoard = 7,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameworkModuleDescriptor {
@@ -757,6 +781,7 @@ pub struct FrameworkModuleDescriptor {
     pub vendor_id: u32,
     pub product_id: u32,
     pub board_id: i32,
+    pub position: FrameworkInputModulePosition,
 }
 
 #[repr(C)]

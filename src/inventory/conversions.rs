@@ -101,6 +101,7 @@ pub(super) fn module_descriptor(
         vendor_id,
         product_id,
         board_id,
+        position: FrameworkInputModulePosition::Unknown,
     }
 }
 

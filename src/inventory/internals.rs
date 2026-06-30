@@ -24,6 +24,17 @@ pub(super) struct InternalModules {
     pub(super) webcam: FrameworkModuleDescriptor,
 }
 
+fn top_row_position(index: usize) -> FrameworkInputModulePosition {
+    match index {
+        0 => FrameworkInputModulePosition::TopRow0,
+        1 => FrameworkInputModulePosition::TopRow1,
+        2 => FrameworkInputModulePosition::TopRow2,
+        3 => FrameworkInputModulePosition::TopRow3,
+        4 => FrameworkInputModulePosition::TopRow4,
+        _ => FrameworkInputModulePosition::Unknown,
+    }
+}
+
 pub(super) fn detect_internal_modules(
     handle: &FrameworkEcHandle,
     family: Option<PlatformFamily>,
@@ -60,6 +71,7 @@ pub(super) fn detect_internal_modules(
                     0,
                     -1,
                 );
+                top_row[index].position = top_row_position(index);
             }
 
             input_touchpad = module_descriptor(
@@ -78,6 +90,7 @@ pub(super) fn detect_internal_modules(
                 0,
                 i32::from(deck.touchpad_id),
             );
+            input_touchpad.position = FrameworkInputModulePosition::Touchpad;
         }
 
         for module in detect_input_modules_local() {
@@ -96,6 +109,8 @@ pub(super) fn detect_internal_modules(
                 module.product_id as u32,
                 -1,
             );
+            top_row[module.slot_index as usize].position =
+                top_row_position(module.slot_index as usize);
         }
     } else if crate::feature_enabled(&handle.ec, EcFeatureCode::Keyboard).unwrap_or(false) {
         internal_keyboard = module_descriptor(
@@ -128,6 +143,7 @@ pub(super) fn detect_internal_modules(
                 device.product_id as u32,
                 board_id,
             );
+            input_touchpad.position = FrameworkInputModulePosition::Touchpad;
         }
     } else {
         let mut present =

@@ -65,6 +65,7 @@ pub(super) fn default_module_descriptor() -> FrameworkModuleDescriptor {
         vendor_id: 0,
         product_id: 0,
         board_id: -1,
+        position: FrameworkInputModulePosition::Unknown,
     }
 }
 
