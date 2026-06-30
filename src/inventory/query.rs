@@ -52,15 +52,36 @@ pub(crate) fn expansion_bay_status(
         .map(|serial| FrameworkByteBuffer::from_vec(serial.into_bytes()))
         .unwrap_or_default();
 
+    // The Framework 16 graphics modules expose a single rear USB-C port; other bay contents (fans, SSD holder,
+    // PCIe accessory) do not. When one is present, surface its static capability and probe its live PD state —
+    // the EC enumerates the bay port after the six side slots, at PD port index 6.
+    let has_usb_c_port = matches!(
+        vendor,
+        FrameworkExpansionBayVendor::AmdGpu | FrameworkExpansionBayVendor::NvidiaGpu
+    );
+    let capability = if has_usb_c_port {
+        super::capabilities::gpu_module_capability(vendor)
+    } else {
+        super::capabilities::unknown_capability()
+    };
+    let pd = if has_usb_c_port {
+        crate::pd::query_pd_port_state(ec, 6)
+    } else {
+        crate::pd::default_pd_port_state()
+    };
+
     Ok(FrameworkEcExpansionBayStatus {
         present: u8::from(present),
         enabled: u8::from(info.module_enabled()),
         fault: u8::from(info.module_fault()),
         door_closed: u8::from(info.hatch_switch_closed()),
+        has_usb_c_port: u8::from(has_usb_c_port),
+        reserved: [0; 3],
         board,
         vendor,
         config,
-        reserved: [0; 3],
+        pd,
+        capability,
         serial_number,
     })
 }

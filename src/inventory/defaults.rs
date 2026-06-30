@@ -37,10 +37,13 @@ pub(crate) fn default_expansion_bay_status() -> FrameworkEcExpansionBayStatus {
         enabled: 0,
         fault: 0,
         door_closed: 0,
+        has_usb_c_port: 0,
+        reserved: [0; 3],
         board: FrameworkExpansionBayBoard::Unknown,
         vendor: FrameworkExpansionBayVendor::Unknown,
         config: FrameworkGpuPcieConfig::Unknown,
-        reserved: [0; 3],
+        pd: pd::default_pd_port_state(),
+        capability: super::capabilities::unknown_capability(),
         serial_number: FrameworkByteBuffer::default(),
     }
 }
@@ -86,6 +89,7 @@ pub(super) fn default_expansion_card_module_descriptor() -> FrameworkExpansionCa
         pd: pd::default_pd_port_state(),
         card_type: FrameworkExpansionCardType::Unknown,
         card_confidence: FrameworkModuleConfidence::Unknown,
+        capability: super::capabilities::unknown_capability(),
         reserved: 0,
     }
 }

@@ -618,10 +618,17 @@ pub struct FrameworkEcExpansionBayStatus {
     pub enabled: u8,
     pub fault: u8,
     pub door_closed: u8,
+    /// 1 when the installed bay module exposes a USB-C port (e.g. the FW16 graphics modules); then `pd` and
+    /// `capability` describe that port.
+    pub has_usb_c_port: u8,
+    pub reserved: [u8; 3],
     pub board: FrameworkExpansionBayBoard,
     pub vendor: FrameworkExpansionBayVendor,
     pub config: FrameworkGpuPcieConfig,
-    pub reserved: [u8; 3],
+    /// Live Power Delivery state of the bay module's USB-C port (default/empty when `has_usb_c_port == 0`).
+    pub pd: FrameworkEcPdPortState,
+    /// Static capability of the bay module's USB-C port (default when `has_usb_c_port == 0`).
+    pub capability: FrameworkUsbCPortCapability,
     pub serial_number: FrameworkByteBuffer,
 }
 
@@ -683,6 +690,58 @@ pub enum FrameworkExpansionCardType {
     MicroSd = 8,
     Sd = 9,
     Ssd = 10,
+}
+
+/// USB-C data-lane capability of an expansion-card slot. Static board spec sourced from a per-platform table,
+/// not the live negotiated link — the EC does not report this.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkUsbCDataLane {
+    Unknown = 0,
+    Usb2 = 1,
+    Usb32 = 2,
+    Usb32Gen2x1 = 3,
+    Usb32Gen2x2 = 4,
+    Usb4 = 5,
+    Thunderbolt4 = 6,
+}
+
+/// DisplayPort alt-mode capability and version of an expansion-card slot. Static board spec, not the live
+/// alt-mode reported in `FrameworkEcPdPortState::alt_mode_flags`.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkDisplayPortCapability {
+    None = 0,
+    /// DisplayPort 1.4 / 1.4a (HBR3).
+    Dp14Hbr3 = 1,
+    /// DisplayPort 2.0 without a documented UHBR qualifier (e.g. FW13 Core Ultra Series 1).
+    Dp20 = 2,
+    Dp20Uhbr10 = 3,
+    Dp20Uhbr20 = 4,
+    /// DisplayPort 2.1 without a documented UHBR qualifier (e.g. the FW16 GPU-module port).
+    Dp21 = 5,
+    Dp21Uhbr10 = 6,
+    Dp21Uhbr20 = 7,
+    /// Supported but the version is not documented in the source table.
+    Supported = 8,
+}
+
+/// Static USB-C port capability of an expansion-card slot, sourced from a per-platform board table (the EC does
+/// not expose these). Distinct from the live `FrameworkEcPdPortState` negotiation on the same slot.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameworkUsbCPortCapability {
+    /// 1 when the per-platform table covers this slot; 0 for unknown platforms/slots.
+    pub known: u8,
+    /// 1 when the slot supports USB Power Delivery charging; 0 for a power-limited (e.g. 900 mA) slot.
+    pub supports_pd: u8,
+    /// 1 when the "higher power consumption" USB-A note applies to this slot.
+    pub usb_a_high_power: u8,
+    pub reserved_0: u8,
+    pub data_lane: FrameworkUsbCDataLane,
+    pub displayport: FrameworkDisplayPortCapability,
+    /// Maximum charge power in watts (0 when the slot is not a charging port); e.g. 240 or 140.
+    pub max_charge_watts: u16,
 }
 
 #[repr(i32)]
@@ -801,6 +860,8 @@ pub struct FrameworkExpansionCardModuleDescriptor {
     pub pd: FrameworkEcPdPortState,
     pub card_type: FrameworkExpansionCardType,
     pub card_confidence: FrameworkModuleConfidence,
+    /// Static per-platform slot capability (data lane / DisplayPort / charging). Independent of `pd`.
+    pub capability: FrameworkUsbCPortCapability,
     pub reserved: u8,
 }
 

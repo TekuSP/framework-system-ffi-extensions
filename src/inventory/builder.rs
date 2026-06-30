@@ -48,15 +48,21 @@ pub(crate) fn build_module_inventory(handle: &FrameworkEcHandle) -> FrameworkMod
     let mut detached_count = 0u8;
 
     let family = smbios::get_family();
-    let usb_c_slot_count = if family == Some(PlatformFamily::Framework16) {
-        6
-    } else {
-        4
+    let platform: FrameworkPlatform = smbios::get_platform()
+        .map(Into::into)
+        .unwrap_or(FrameworkPlatform::UnknownSystem);
+    // Expansion-card slot count is platform-specific: FW16 has 6, the Desktop exposes 2 front slots, and the
+    // FW12/FW13 laptops have 4. Querying more than exist returns garbage PD state for the non-existent ports.
+    let usb_c_slot_count: u8 = match family {
+        Some(PlatformFamily::Framework16) => 6,
+        Some(PlatformFamily::FrameworkDesktop) => 2,
+        _ => 4,
     };
 
     populate_usb_slots(
         handle,
         usb_c_slot_count,
+        platform,
         &mut usb_slots,
         &mut detached,
         &mut detached_count,

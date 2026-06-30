@@ -1,4 +1,5 @@
 mod builder;
+mod capabilities;
 mod conversions;
 mod defaults;
 mod detect;

@@ -33,6 +33,8 @@ fn make_expansion_card(
         pd: pd_state,
         card_type,
         card_confidence,
+        // Placeholder; the platform-specific slot capability is applied once at the end of populate_usb_slots.
+        capability: super::capabilities::unknown_capability(),
         reserved: 0,
     }
 }
@@ -61,6 +63,7 @@ fn pd_flags(pd: &FrameworkEcPdPortState) -> u32 {
 pub(super) fn populate_usb_slots(
     handle: &FrameworkEcHandle,
     usb_c_slot_count: u8,
+    platform: FrameworkPlatform,
     usb_slots: &mut [FrameworkExpansionCardModuleDescriptor; MAX_USB_C_SLOT_COUNT],
     detached: &mut [FrameworkModuleDescriptor; 4],
     detached_count: &mut u8,
@@ -291,6 +294,21 @@ pub(super) fn populate_usb_slots(
         FrameworkModuleConfidence::DerivedWeak,
         FrameworkModuleConfidence::DerivedWeak,
     );
+
+    // Apply the static per-platform slot capability (data lane / DisplayPort / charging). Slots the board does
+    // not wire for PD (e.g. FW16 slots 3 & 6 at 900 mA) report a garbage/Invalid PD state from the EC, so clear
+    // it here — they are surfaced by capability alone, not as broken PD ports.
+    for (index, slot) in usb_slots
+        .iter_mut()
+        .enumerate()
+        .take(usb_c_slot_count as usize)
+    {
+        let capability = super::capabilities::slot_capability(platform, index);
+        slot.capability = capability;
+        if capability.known != 0 && capability.supports_pd == 0 {
+            slot.pd = pd::default_pd_port_state();
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
