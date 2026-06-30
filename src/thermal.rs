@@ -1,12 +1,13 @@
 use framework_lib::chromium_ec::commands::EcFeatureCode;
 use framework_lib::chromium_ec::{CrosEc, CrosEcDriver};
 use framework_lib::smbios;
+use framework_lib::smbios::Platform;
 use framework_lib::smbios::PlatformFamily;
 
 use crate::{
     FrameworkBatterySnapshot, FrameworkBatteryState, FrameworkByteBuffer, FrameworkFanCapabilities,
     FrameworkFanFeaturesState, FrameworkFanName, FrameworkFanReading, FrameworkFanState,
-    FrameworkPowerSnapshot, FrameworkPowerSourceState, FrameworkStatus,
+    FrameworkPowerSnapshot, FrameworkPowerSourceState, FrameworkSensorName, FrameworkStatus,
     FrameworkTemperatureReading, FrameworkTemperatureState, FrameworkThermalSnapshot,
 };
 
@@ -166,7 +167,88 @@ fn default_temperature_reading() -> FrameworkTemperatureReading {
     FrameworkTemperatureReading {
         state: FrameworkTemperatureState::NotPresent,
         celsius: 0,
-        reserved: 0,
+        name: FrameworkSensorName::Unknown,
+    }
+}
+
+/// Maps a temperature sensor slot to its platform role name. This is the return-based mirror of the
+/// per-platform sensor labels that `framework_lib::power::print_thermal` only prints to stdout; slots
+/// past the labelled set (and the generic fallback platform) resolve to `Generic`.
+fn sensor_name(
+    index: usize,
+    platform: Option<Platform>,
+    family: Option<PlatformFamily>,
+) -> FrameworkSensorName {
+    use FrameworkSensorName as N;
+
+    match platform {
+        Some(Platform::IntelGen11 | Platform::IntelGen12 | Platform::IntelGen13) => match index {
+            0 => N::F75303Local,
+            1 => N::F75303Cpu,
+            2 => N::F75303Ddr,
+            3 => N::Battery,
+            4 => N::Peci,
+            5 if matches!(platform, Some(Platform::IntelGen12 | Platform::IntelGen13)) => {
+                N::F57397VccGt
+            }
+            _ => N::Generic,
+        },
+        Some(Platform::IntelCoreUltra1) => match index {
+            0 => N::F75303Local,
+            1 => N::F75303Cpu,
+            2 => N::Battery,
+            3 => N::F75303Ddr,
+            4 => N::Peci,
+            _ => N::Generic,
+        },
+        Some(Platform::Framework12IntelGen13) => match index {
+            0 => N::F75303Cpu,
+            1 => N::F75303Skin,
+            2 => N::F75303Local,
+            3 => N::Battery,
+            4 => N::Peci,
+            5 => N::ChargerIc,
+            _ => N::Generic,
+        },
+        Some(
+            Platform::Framework13Amd7080
+            | Platform::Framework13AmdAi300
+            | Platform::Framework16Amd7080
+            | Platform::Framework16AmdAi300,
+        ) => {
+            // Framework 16 reports four extra dGPU sensors after the shared APU set.
+            if family == Some(PlatformFamily::Framework16) {
+                match index {
+                    0 => N::F75303Local,
+                    1 => N::F75303Cpu,
+                    2 => N::F75303Ddr,
+                    3 => N::Apu,
+                    4 => N::DgpuVr,
+                    5 => N::DgpuVram,
+                    6 => N::DgpuAmb,
+                    7 => N::DgpuTemp,
+                    _ => N::Generic,
+                }
+            } else {
+                match index {
+                    0 => N::F75303Local,
+                    1 => N::F75303Cpu,
+                    2 => N::F75303Ddr,
+                    3 => N::Apu,
+                    _ => N::Generic,
+                }
+            }
+        }
+        Some(Platform::FrameworkDesktopAmdAiMax300) => match index {
+            0 => N::F75303Apu,
+            1 => N::F75303Ddr,
+            2 => N::F75303Amb,
+            3 => N::Apu,
+            4 => N::Virtual,
+            _ => N::Generic,
+        },
+        Some(_) => N::Generic,
+        None => N::Unknown,
     }
 }
 
@@ -279,12 +361,13 @@ pub(crate) fn build_fan_capabilities(
 pub(crate) fn build_thermal_snapshot(ec: &CrosEc) -> Option<FrameworkThermalSnapshot> {
     let snapshot = thermal_snapshot(ec)?;
     let family = smbios::get_family();
+    let platform = smbios::get_platform();
     let mut temperatures = [default_temperature_reading(); THERMAL_SENSOR_COUNT];
     for (index, reading) in snapshot.temperatures.iter().enumerate() {
         temperatures[index] = FrameworkTemperatureReading {
             state: reading.status.into(),
             celsius: reading.celsius,
-            reserved: 0,
+            name: sensor_name(index, platform, family),
         };
     }
 

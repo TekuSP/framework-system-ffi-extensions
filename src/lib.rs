@@ -185,12 +185,42 @@ pub enum FrameworkEcCurrentImage {
     Rw = 2,
 }
 
+/// Platform-specific role name for a temperature sensor slot, mirrored from `framework_lib`'s
+/// per-platform thermal sensor labels (see `power::print_thermal`). Values beyond the labelled
+/// sensors fall back to `Generic`; an undetermined platform yields `Unknown`.
+#[repr(u16)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkSensorName {
+    /// Platform could not be determined; sensor role is indeterminate.
+    Unknown = 0,
+    /// Platform known but no specific name assigned to this slot.
+    Generic = 1,
+    F75303Local = 2,
+    F75303Cpu = 3,
+    F75303Ddr = 4,
+    Battery = 5,
+    Peci = 6,
+    F57397VccGt = 7,
+    F75303Skin = 8,
+    ChargerIc = 9,
+    Apu = 10,
+    DgpuVr = 11,
+    DgpuVram = 12,
+    DgpuAmb = 13,
+    DgpuTemp = 14,
+    F75303Apu = 15,
+    F75303Amb = 16,
+    Virtual = 17,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameworkTemperatureReading {
     pub state: FrameworkTemperatureState,
     pub celsius: i16,
-    pub reserved: u16,
+    /// The sensor's platform role name. Occupies the former `reserved` u16 slot, so the struct
+    /// layout/size is unchanged for existing managed callers.
+    pub name: FrameworkSensorName,
 }
 
 #[repr(i32)]
