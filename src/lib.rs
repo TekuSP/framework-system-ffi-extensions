@@ -726,6 +726,22 @@ pub enum FrameworkDisplayPortCapability {
     Supported = 8,
 }
 
+/// Physical position of an EC PD port, mirroring upstream framework-system (power.rs `get_and_print_pd_info`):
+/// index 0 = Right Back, 1 = Right Middle/Front, 2 = Left Middle/Front, 3 = Left Back — "Middle" on Framework 16,
+/// "Front" on the other laptops. `GraphicsModule` is the FW16 dGPU rear port; `Unknown` for undocumented platforms.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkUsbCPortPosition {
+    Unknown = 0,
+    RightBack = 1,
+    RightMiddle = 2,
+    RightFront = 3,
+    LeftMiddle = 4,
+    LeftFront = 5,
+    LeftBack = 6,
+    GraphicsModule = 7,
+}
+
 /// Static USB-C port capability of an expansion-card slot, sourced from a per-platform board table (the EC does
 /// not expose these). Distinct from the live `FrameworkEcPdPortState` negotiation on the same slot.
 #[repr(C)]
@@ -737,7 +753,8 @@ pub struct FrameworkUsbCPortCapability {
     pub supports_pd: u8,
     /// 1 when the "higher power consumption" USB-A note applies to this slot.
     pub usb_a_high_power: u8,
-    pub reserved_0: u8,
+    /// Physical position of this PD port (Right Back, Left Middle, Graphics module, …).
+    pub position: FrameworkUsbCPortPosition,
     pub data_lane: FrameworkUsbCDataLane,
     pub displayport: FrameworkDisplayPortCapability,
     /// Maximum charge power in watts (0 when the slot is not a charging port); e.g. 240 or 140.

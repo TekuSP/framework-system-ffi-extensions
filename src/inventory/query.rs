@@ -53,8 +53,8 @@ pub(crate) fn expansion_bay_status(
         .unwrap_or_default();
 
     // The Framework 16 graphics modules expose a single rear USB-C port; other bay contents (fans, SSD holder,
-    // PCIe accessory) do not. When one is present, surface its static capability and probe its live PD state —
-    // the EC enumerates the bay port after the six side slots, at PD port index 6.
+    // PCIe accessory) do not. When one is present, surface its static capability and probe its live PD state. The
+    // four mainboard PD ports are indices 0-3 (upstream `ports = 4`); the graphics-module port is the 5th, index 4.
     let has_usb_c_port = matches!(
         vendor,
         FrameworkExpansionBayVendor::AmdGpu | FrameworkExpansionBayVendor::NvidiaGpu
@@ -65,7 +65,7 @@ pub(crate) fn expansion_bay_status(
         super::capabilities::unknown_capability()
     };
     let pd = if has_usb_c_port {
-        crate::pd::query_pd_port_state(ec, 6)
+        crate::pd::query_pd_port_state(ec, 4)
     } else {
         crate::pd::default_pd_port_state()
     };

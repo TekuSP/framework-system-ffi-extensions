@@ -51,13 +51,7 @@ pub(crate) fn build_module_inventory(handle: &FrameworkEcHandle) -> FrameworkMod
     let platform: FrameworkPlatform = smbios::get_platform()
         .map(Into::into)
         .unwrap_or(FrameworkPlatform::UnknownSystem);
-    // Expansion-card slot count is platform-specific: FW16 has 6, the Desktop exposes 2 front slots, and the
-    // FW12/FW13 laptops have 4. Querying more than exist returns garbage PD state for the non-existent ports.
-    let usb_c_slot_count: u8 = match family {
-        Some(PlatformFamily::Framework16) => 6,
-        Some(PlatformFamily::FrameworkDesktop) => 2,
-        _ => 4,
-    };
+    let usb_c_slot_count: u8 = mainboard_pd_port_count(family);
 
     populate_usb_slots(
         handle,
@@ -98,5 +92,45 @@ pub(crate) fn build_module_inventory(handle: &FrameworkEcHandle) -> FrameworkMod
         detached_1: detached[1],
         detached_2: detached[2],
         detached_3: detached[3],
+    }
+}
+
+/// Number of mainboard EC PD ports for a platform family. Upstream framework-system exposes **4 on every laptop**
+/// (power.rs `get_and_print_pd_info`: `let ports = 4; // All our platforms have 4 PD ports so far`); the Framework
+/// 16 dGPU adds a 5th PD port separately via the expansion bay. The Desktop exposes 2 front expansion slots.
+pub(super) fn mainboard_pd_port_count(family: Option<PlatformFamily>) -> u8 {
+    match family {
+        Some(PlatformFamily::FrameworkDesktop) => 2,
+        _ => 4,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn framework16_reports_four_mainboard_pd_ports() {
+        // FW16 mainboard = 4 PD ports; the graphics module adds a 5th separately, so the app shows 4 + GPU = 5.
+        assert_eq!(
+            mainboard_pd_port_count(Some(PlatformFamily::Framework16)),
+            4
+        );
+    }
+
+    #[test]
+    fn framework13_reports_four_mainboard_pd_ports() {
+        assert_eq!(
+            mainboard_pd_port_count(Some(PlatformFamily::Framework13)),
+            4
+        );
+    }
+
+    #[test]
+    fn desktop_reports_two_front_ports() {
+        assert_eq!(
+            mainboard_pd_port_count(Some(PlatformFamily::FrameworkDesktop)),
+            2
+        );
     }
 }
