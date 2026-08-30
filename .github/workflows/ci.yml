@@ -103,5 +103,8 @@ jobs:
       - name: Run cargo fmt
         run: cargo fmt --all -- --check
 
+      # --no-deps keeps the lint gate on this crate only. framework_lib is a path
+      # dependency, so clippy treats it as a local package and would otherwise fail
+      # the build on upstream lint debt against whatever stable toolchain CI picks up.
       - name: Run cargo clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --no-deps --all-targets -- -D warnings

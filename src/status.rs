@@ -111,6 +111,9 @@ impl FrameworkStatus {
                 Self::ec_response(ec_response_detail_from_raw(detail))
             }
             FrameworkStatusCode::UnknownResponseCode => Self::unknown_response_code(detail),
+            FrameworkStatusCode::NotSupported => {
+                Self::no_payload(FrameworkStatusCode::NotSupported)
+            }
             FrameworkStatusCode::DataUnavailable => {
                 Self::no_payload(FrameworkStatusCode::DataUnavailable)
             }
@@ -234,6 +237,9 @@ pub(crate) fn status_description(status: FrameworkStatus) -> String {
         FrameworkStatusCode::NoDriverAvailable => "No EC driver available".to_string(),
         FrameworkStatusCode::UnsupportedDriver => {
             "Requested EC driver is not supported on this system".to_string()
+        }
+        FrameworkStatusCode::NotSupported => {
+            "This capability is not available in this build for this platform".to_string()
         }
         FrameworkStatusCode::DeviceError => {
             if let Some(message) = status

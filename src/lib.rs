@@ -5,13 +5,17 @@ use framework_lib::smbios;
 mod abi_impls;
 mod byte_buffer;
 mod controls;
+mod diagnostics;
 mod gpu_descriptor;
 mod inventory;
 mod pd;
+mod peripherals;
 mod results;
 mod runtime;
+mod smart_battery;
 mod status;
 mod thermal;
+mod versions;
 
 use results::{
     active_driver_result, build_info_result, default_ec_flash_versions, fan_capabilities_result,
@@ -44,6 +48,9 @@ pub enum FrameworkStatusCode {
     EcResponse = -6,
     UnknownResponseCode = -7,
     DataUnavailable = -8,
+    /// The capability is not compiled in on this platform, as opposed to being
+    /// present but unavailable. NVMe readback on non-Linux hosts is the current case.
+    NotSupported = -9,
 }
 
 #[repr(C)]
@@ -2128,4 +2135,2137 @@ pub unsafe extern "C" fn framework_ec_restore_auto_fan_control(
     };
 
     restore_auto_fan_control_result(status, requested_fan_index)
+}
+
+// ---------------------------------------------------------------------------
+// EC switches
+// ---------------------------------------------------------------------------
+
+/// Live EC switch positions read from the memmap switch byte.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcSwitchesResult {
+    pub status: FrameworkStatus,
+    /// The raw switch byte, for callers that want bits the ABI does not name.
+    pub raw: u8,
+    pub lid_open: u8,
+    pub power_button_pressed: u8,
+    /// Note the inverted sense: 1 means write protect is *disabled*.
+    pub write_protect_disabled: u8,
+    pub dedicated_recovery: u8,
+    pub reserved: [u8; 3],
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_switches(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcSwitchesResult {
+    let fail = |status| FrameworkEcSwitchesResult {
+        status,
+        raw: 0,
+        lid_open: 0,
+        power_button_pressed: 0,
+        write_protect_disabled: 0,
+        dedicated_recovery: 0,
+        reserved: [0; 3],
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    let Some(switches) = diagnostics::get_switches(&handle.ec) else {
+        return fail(FrameworkStatus::with(
+            FrameworkStatusCode::DataUnavailable,
+            0,
+        ));
+    };
+
+    FrameworkEcSwitchesResult {
+        status: FrameworkStatus::success(),
+        raw: switches.raw,
+        lid_open: u8::from(switches.lid_open),
+        power_button_pressed: u8::from(switches.power_button_pressed),
+        write_protect_disabled: u8::from(switches.write_protect_disabled),
+        dedicated_recovery: u8::from(switches.dedicated_recovery),
+        reserved: [0; 3],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EC liveness and protocol
+// ---------------------------------------------------------------------------
+
+/// Result of the EC `hello` diagnostic command.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcHelloResult {
+    pub status: FrameworkStatus,
+    /// What the EC echoed back: `in_data + 0x01020304` on a healthy EC.
+    pub out_data: u32,
+    /// 1 when `out_data` matched the expected echo, 0 otherwise.
+    pub is_expected: u8,
+    pub reserved: [u8; 3],
+}
+
+#[no_mangle]
+/// Sends the EC `hello` command and checks the echo.
+///
+/// Pass any `in_data`; the EC must return `in_data + 0x01020304`. This is the
+/// cheapest end-to-end check that EC host communication actually works.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_hello(
+    handle: *const FrameworkEcHandle,
+    in_data: u32,
+) -> FrameworkEcHelloResult {
+    let fail = |status| FrameworkEcHelloResult {
+        status,
+        out_data: 0,
+        is_expected: 0,
+        reserved: [0; 3],
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match handle.ec.hello(in_data) {
+        Ok(out_data) => FrameworkEcHelloResult {
+            status: FrameworkStatus::success(),
+            out_data,
+            is_expected: u8::from(out_data == in_data.wrapping_add(diagnostics::HELLO_OFFSET)),
+            reserved: [0; 3],
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+#[no_mangle]
+/// Convenience wrapper over `framework_ec_hello` using the same magic value
+/// upstream's `check_hello` uses.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_check_hello(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcHelloResult {
+    framework_ec_hello(handle, diagnostics::HELLO_DEFAULT_IN_DATA)
+}
+
+/// Set when `EC_RES_IN_PROGRESS` may be returned by a slow command.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkEcProtocolFlag {
+    InProgressSupported = 0x01,
+}
+
+/// EC host command protocol capabilities.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcProtocolInfoResult {
+    pub status: FrameworkStatus,
+    /// Bitmask of supported protocol versions; bit N means version N.
+    pub protocol_versions: u32,
+    pub max_request_packet_size: u16,
+    pub max_response_packet_size: u16,
+    /// See `FrameworkEcProtocolFlag`.
+    pub flags: u32,
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_protocol_info(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcProtocolInfoResult {
+    let fail = |status| FrameworkEcProtocolInfoResult {
+        status,
+        protocol_versions: 0,
+        max_request_packet_size: 0,
+        max_response_packet_size: 0,
+        flags: 0,
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match diagnostics::get_protocol_info(&handle.ec) {
+        Ok(info) => FrameworkEcProtocolInfoResult {
+            status: FrameworkStatus::success(),
+            protocol_versions: info.protocol_versions,
+            max_request_packet_size: info.max_request_packet_size,
+            max_response_packet_size: info.max_response_packet_size,
+            flags: info.flags,
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sysinfo
+// ---------------------------------------------------------------------------
+
+/// Bit values of `FrameworkEcSysinfoResult::flags`.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkEcSysinfoFlag {
+    /// Write protect is asserted, debug features are disabled.
+    Locked = 0x01,
+    /// Locked even if write protect is deasserted.
+    ForceLocked = 0x02,
+    /// Jumping between images is enabled.
+    JumpEnabled = 0x04,
+    /// EC jumped directly to the current image at boot.
+    JumpedToCurrentImage = 0x08,
+    /// EC will reboot when the system shuts down.
+    RebootAtShutdown = 0x10,
+    /// System is in manual recovery mode.
+    InManualRecovery = 0x20,
+}
+
+/// Bit values of the EC reset-flag words reported by sysinfo and uptime.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkEcResetFlag {
+    Other = 0x0000_0001,
+    ResetPin = 0x0000_0002,
+    Brownout = 0x0000_0004,
+    PowerOn = 0x0000_0008,
+    Watchdog = 0x0000_0010,
+    Soft = 0x0000_0020,
+    Hibernate = 0x0000_0040,
+    RtcAlarm = 0x0000_0080,
+    WakePin = 0x0000_0100,
+    LowBattery = 0x0000_0200,
+    Sysjump = 0x0000_0400,
+    Hard = 0x0000_0800,
+    ApOff = 0x0000_1000,
+    Preserved = 0x0000_2000,
+    UsbResume = 0x0000_4000,
+    Rdd = 0x0000_8000,
+    Rbox = 0x0001_0000,
+    Security = 0x0002_0000,
+    ApWatchdog = 0x0004_0000,
+    StayInRo = 0x0008_0000,
+    Efs = 0x0010_0000,
+    ApIdle = 0x0020_0000,
+    InitialPwr = 0x0040_0000,
+}
+
+/// EC system information: which image is running and why it booted.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcSysinfoResult {
+    pub status: FrameworkStatus,
+    pub current_image: FrameworkEcCurrentImage,
+    /// See `FrameworkEcResetFlag`.
+    pub reset_flags: u32,
+    /// See `FrameworkEcSysinfoFlag`.
+    pub flags: u32,
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_sysinfo(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcSysinfoResult {
+    let fail = |status| FrameworkEcSysinfoResult {
+        status,
+        current_image: FrameworkEcCurrentImage::Unknown,
+        reset_flags: 0,
+        flags: 0,
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match diagnostics::get_sysinfo(&handle.ec) {
+        Ok(info) => FrameworkEcSysinfoResult {
+            status: FrameworkStatus::success(),
+            current_image: match info.current_image {
+                1 => FrameworkEcCurrentImage::Ro,
+                2 => FrameworkEcCurrentImage::Rw,
+                _ => FrameworkEcCurrentImage::Unknown,
+            },
+            reset_flags: info.reset_flags,
+            flags: info.flags,
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Panic info
+// ---------------------------------------------------------------------------
+
+/// Saved EC panic data.
+///
+/// The `data` buffer holds the raw `struct panic_data` blob and must be
+/// released with `framework_byte_buffer_free`. A zero-length buffer with a
+/// success status means the EC simply has no stored panic.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcPanicInfoResult {
+    pub status: FrameworkStatus,
+    pub data: FrameworkByteBuffer,
+    /// Architecture tag from the blob header.
+    pub arch: u8,
+    pub struct_version: u8,
+    /// Panic data flags from the blob header.
+    pub flags: u8,
+    /// 1 when the trailer magic and struct size both agree with the payload.
+    pub is_valid: u8,
+    /// Struct size the EC reported in the blob trailer.
+    pub struct_size: u32,
+    /// Trailer magic; `0x21636E50` ("Pnc!") when valid.
+    pub magic: u32,
+}
+
+#[no_mangle]
+/// Reads stored EC panic data without clearing the EC's "already read" flag
+/// where the EC supports the v1 command.
+///
+/// The returned `data` buffer must be released with `framework_byte_buffer_free`.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_panic_info(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcPanicInfoResult {
+    let fail = |status| FrameworkEcPanicInfoResult {
+        status,
+        data: FrameworkByteBuffer::default(),
+        arch: 0,
+        struct_version: 0,
+        flags: 0,
+        is_valid: 0,
+        struct_size: 0,
+        magic: 0,
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match diagnostics::get_panic_info(&handle.ec) {
+        Ok(info) => FrameworkEcPanicInfoResult {
+            status: FrameworkStatus::success(),
+            data: FrameworkByteBuffer::from_vec(info.data),
+            arch: info.arch,
+            struct_version: info.struct_version,
+            flags: info.flags,
+            is_valid: u8::from(info.is_valid),
+            struct_size: info.struct_size,
+            magic: info.magic,
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Port 80 history
+// ---------------------------------------------------------------------------
+
+/// Marker codes the EC inserts into the port 80 history.
+#[repr(u16)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkPort80Event {
+    /// The system resumed (S3 -> S0).
+    Resume = 0x1001,
+    /// The system reset.
+    Reset = 0x1002,
+}
+
+/// Port 80 POST code history read from the EC.
+///
+/// `codes` holds `history_size` little-endian `u16` entries in buffer order, so
+/// its length is `history_size * 2` bytes. The newest entry sits at
+/// `writes % history_size`. Release it with `framework_byte_buffer_free`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcPort80HistoryResult {
+    pub status: FrameworkStatus,
+    /// Total number of port 80 writes so far.
+    pub writes: u32,
+    /// Size of the history buffer in entries.
+    pub history_size: u32,
+    pub codes: FrameworkByteBuffer,
+}
+
+#[no_mangle]
+/// The returned `codes` buffer must be released with `framework_byte_buffer_free`.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_port80_history(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcPort80HistoryResult {
+    let fail = |status| FrameworkEcPort80HistoryResult {
+        status,
+        writes: 0,
+        history_size: 0,
+        codes: FrameworkByteBuffer::default(),
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match diagnostics::port80_read(&handle.ec) {
+        Ok(history) => FrameworkEcPort80HistoryResult {
+            status: FrameworkStatus::success(),
+            writes: history.writes,
+            history_size: history.history_size,
+            codes: FrameworkByteBuffer::from_vec(history.codes),
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Battery cutoff and AP throttle
+// ---------------------------------------------------------------------------
+
+/// Battery cutoff (ship mode) state.
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkBatteryCutoffState {
+    /// The EC did not answer the cutoff query.
+    Unknown = 0,
+    NotCutOff = 1,
+    CutOff = 2,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcBatteryCutoffResult {
+    pub status: FrameworkStatus,
+    pub state: FrameworkBatteryCutoffState,
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_battery_cutoff_status(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcBatteryCutoffResult {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => {
+            return FrameworkEcBatteryCutoffResult {
+                status,
+                state: FrameworkBatteryCutoffState::Unknown,
+            }
+        }
+    };
+    match thermal::get_cutoff_status(&handle.ec) {
+        Some(cut_off) => FrameworkEcBatteryCutoffResult {
+            status: FrameworkStatus::success(),
+            state: if cut_off {
+                FrameworkBatteryCutoffState::CutOff
+            } else {
+                FrameworkBatteryCutoffState::NotCutOff
+            },
+        },
+        None => FrameworkEcBatteryCutoffResult {
+            status: FrameworkStatus::with(FrameworkStatusCode::DataUnavailable, 0),
+            state: FrameworkBatteryCutoffState::Unknown,
+        },
+    }
+}
+
+/// Whether the EC is currently throttling the AP for thermal reasons.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcApThrottleResult {
+    pub status: FrameworkStatus,
+    pub soft_throttled: u8,
+    pub hard_throttled: u8,
+    pub reserved: [u8; 2],
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_ap_throttle_status(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcApThrottleResult {
+    let fail = |status| FrameworkEcApThrottleResult {
+        status,
+        soft_throttled: 0,
+        hard_throttled: 0,
+        reserved: [0; 2],
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match thermal::get_ap_throttle(&handle.ec) {
+        Ok(throttle) => FrameworkEcApThrottleResult {
+            status: FrameworkStatus::success(),
+            soft_throttled: u8::from(throttle.soft),
+            hard_throttled: u8::from(throttle.hard),
+            reserved: [0; 2],
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Thermal thresholds
+// ---------------------------------------------------------------------------
+
+/// Bit values of `FrameworkThermalThresholds::enabled_mask`.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkThermalThresholdFlag {
+    Warn = 0x01,
+    High = 0x02,
+    Halt = 0x04,
+    WarnRelease = 0x08,
+    HighRelease = 0x10,
+    HaltRelease = 0x20,
+    FanOff = 0x40,
+    FanMax = 0x80,
+}
+
+/// EC thermal configuration for one temperature sensor.
+///
+/// The EC stores thresholds in Kelvin with zero meaning "disabled". This ABI
+/// reports degrees Celsius, so a disabled threshold reads back as -273; always
+/// consult `enabled_mask` rather than testing the Celsius value.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameworkThermalThresholds {
+    /// See `FrameworkThermalThresholdFlag`. A clear bit means that threshold is
+    /// disabled in EC firmware.
+    pub enabled_mask: u32,
+    /// AP is warned above this temperature.
+    pub warn_celsius: i32,
+    /// EC throttles the AP above this temperature.
+    pub high_celsius: i32,
+    /// EC shuts the system down above this temperature.
+    pub halt_celsius: i32,
+    /// Release point for `warn_celsius`; 0 K in firmware means default 1 degree hysteresis.
+    pub warn_release_celsius: i32,
+    /// Release point for `high_celsius`.
+    pub high_release_celsius: i32,
+    /// Release point for `halt_celsius`.
+    pub halt_release_celsius: i32,
+    /// No active cooling is needed below this temperature.
+    pub fan_off_celsius: i32,
+    /// Maximum active cooling is applied above this temperature.
+    pub fan_max_celsius: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcThermalThresholdsResult {
+    pub status: FrameworkStatus,
+    pub sensor_index: u32,
+    pub thresholds: FrameworkThermalThresholds,
+}
+
+#[no_mangle]
+/// Reads the EC thermal configuration for one temperature sensor.
+///
+/// `sensor_index` matches the temperature slot index used by
+/// `framework_ec_get_thermal_snapshot`.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_thermal_thresholds(
+    handle: *const FrameworkEcHandle,
+    sensor_index: u32,
+) -> FrameworkEcThermalThresholdsResult {
+    let fail = |status| FrameworkEcThermalThresholdsResult {
+        status,
+        sensor_index,
+        thresholds: FrameworkThermalThresholds {
+            enabled_mask: 0,
+            warn_celsius: 0,
+            high_celsius: 0,
+            halt_celsius: 0,
+            warn_release_celsius: 0,
+            high_release_celsius: 0,
+            halt_release_celsius: 0,
+            fan_off_celsius: 0,
+            fan_max_celsius: 0,
+        },
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match thermal::get_thermal_thresholds(&handle.ec, sensor_index) {
+        Ok(thresholds) => FrameworkEcThermalThresholdsResult {
+            status: FrameworkStatus::success(),
+            sensor_index,
+            thresholds,
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+#[no_mangle]
+/// Writes EC thermal thresholds for one temperature sensor.
+///
+/// Each value follows upstream's convention: a negative value keeps the current
+/// threshold, zero disables it, and a positive value is degrees Celsius. The
+/// call is a read-modify-write, so untouched thresholds and the release points
+/// are preserved.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_set_thermal_thresholds(
+    handle: *const FrameworkEcHandle,
+    sensor_index: u32,
+    warn_celsius: i32,
+    high_celsius: i32,
+    halt_celsius: i32,
+    fan_off_celsius: i32,
+    fan_max_celsius: i32,
+) -> FrameworkStatus {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return status,
+    };
+    let values = [
+        warn_celsius,
+        high_celsius,
+        halt_celsius,
+        fan_off_celsius,
+        fan_max_celsius,
+    ];
+    match thermal::set_thermal_thresholds(&handle.ec, sensor_index, &values) {
+        Ok(()) => FrameworkStatus::success(),
+        Err(error) => status_from_error(error),
+    }
+}
+
+/// A temperature sensor's name as reported by EC firmware.
+///
+/// The `name` buffer must be released with `framework_byte_buffer_free`.
+/// `mapped_name` is the same name resolved onto the stable
+/// `FrameworkSensorName` enum, or `Generic` when firmware uses a name this
+/// version does not recognise.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcTempSensorNameResult {
+    pub status: FrameworkStatus,
+    pub sensor_index: u32,
+    pub mapped_name: FrameworkSensorName,
+    /// EC sensor type tag: 0 ignored, 1 CPU, 2 board, 3 case, 4 battery.
+    pub sensor_type: u8,
+    pub reserved: [u8; 1],
+    pub name: FrameworkByteBuffer,
+}
+
+#[no_mangle]
+/// Reads a temperature sensor's name from EC firmware.
+///
+/// This costs one host command per call, so it is deliberately kept out of the
+/// polled thermal snapshot: read the names once and cache them, then poll
+/// `framework_ec_get_thermal_snapshot` for values.
+///
+/// The returned `name` buffer must be released with `framework_byte_buffer_free`.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_temp_sensor_name(
+    handle: *const FrameworkEcHandle,
+    sensor_index: u8,
+) -> FrameworkEcTempSensorNameResult {
+    let fail = |status| FrameworkEcTempSensorNameResult {
+        status,
+        sensor_index: u32::from(sensor_index),
+        mapped_name: FrameworkSensorName::Unknown,
+        sensor_type: 0,
+        reserved: [0; 1],
+        name: FrameworkByteBuffer::default(),
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match thermal::get_temp_sensor_info(&handle.ec, sensor_index) {
+        Ok(info) => FrameworkEcTempSensorNameResult {
+            status: FrameworkStatus::success(),
+            sensor_index: u32::from(sensor_index),
+            mapped_name: thermal::map_sensor_name(&info.name),
+            sensor_type: info.sensor_type,
+            reserved: [0; 1],
+            name: FrameworkByteBuffer::from_vec(info.name.into_bytes()),
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+/// Result of the Smart Battery SHA-1 HMAC authentication challenge.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcBatteryAuthResult {
+    pub status: FrameworkStatus,
+    /// 1 when the battery's response matched the expected challenge. A zero with a
+    /// success status means the battery answered but failed authentication.
+    pub authenticated: u8,
+    pub reserved: [u8; 3],
+}
+
+#[no_mangle]
+/// Runs the Smart Battery SHA-1 HMAC challenge/response authentication.
+///
+/// `auth_key` must point to exactly 16 bytes. Passing null, or a battery that does
+/// not answer, yields a non-success status; a battery that answers but fails the
+/// challenge yields success with `authenticated = 0`.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library, and `auth_key` must
+/// point to at least 16 readable bytes.
+pub unsafe extern "C" fn framework_ec_authenticate_battery(
+    handle: *const FrameworkEcHandle,
+    auth_key: *const u8,
+) -> FrameworkEcBatteryAuthResult {
+    let fail = |status| FrameworkEcBatteryAuthResult {
+        status,
+        authenticated: 0,
+        reserved: [0; 3],
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    if auth_key.is_null() {
+        return fail(FrameworkStatus::with(FrameworkStatusCode::NullPointer, 0));
+    }
+
+    let mut key = [0u8; 16];
+    key.copy_from_slice(std::slice::from_raw_parts(auth_key, 16));
+
+    match smart_battery::authenticate(&handle.ec, &key) {
+        Ok(authenticated) => FrameworkEcBatteryAuthResult {
+            status: FrameworkStatus::success(),
+            authenticated: u8::from(authenticated),
+            reserved: [0; 3],
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fan count and standalone mode
+// ---------------------------------------------------------------------------
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcFanCountResult {
+    pub status: FrameworkStatus,
+    pub fan_count: u8,
+    pub reserved: [u8; 3],
+}
+
+#[no_mangle]
+/// Reads the fan count from the EC.
+///
+/// More authoritative than `FrameworkFanCapabilities.fan_count`, which infers
+/// presence from the memmap `0xFFFF` sentinel.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_fan_count(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcFanCountResult {
+    let fail = |status| FrameworkEcFanCountResult {
+        status,
+        fan_count: 0,
+        reserved: [0; 3],
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match thermal::get_fan_count(&handle.ec) {
+        Ok(count) => FrameworkEcFanCountResult {
+            status: FrameworkStatus::success(),
+            fan_count: u8::try_from(count).unwrap_or(u8::MAX),
+            reserved: [0; 3],
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+/// Whether the system runs without a battery (Framework Desktop standalone mode).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcStandaloneModeResult {
+    pub status: FrameworkStatus,
+    /// The EC's own standalone reading.
+    pub is_standalone: u8,
+    /// Standalone state including the platform default.
+    pub standalone_mode: u8,
+    pub reserved: [u8; 2],
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_standalone_mode(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcStandaloneModeResult {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => {
+            return FrameworkEcStandaloneModeResult {
+                status,
+                is_standalone: 0,
+                standalone_mode: 0,
+                reserved: [0; 2],
+            }
+        }
+    };
+    let (is_standalone, standalone_mode) = thermal::standalone_state(&handle.ec);
+    FrameworkEcStandaloneModeResult {
+        status: FrameworkStatus::success(),
+        is_standalone: u8::from(is_standalone),
+        standalone_mode: u8::from(standalone_mode),
+        reserved: [0; 2],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Charger, hibernate delay, fingerprint LED percentage, ADC, command probing
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+/// Sets the battery charge rate limit.
+///
+/// `rate_amps` is in amps. Pass a negative `battery_soc_percent` to apply the limit
+/// unconditionally, matching `framework_ec_set_charge_current_limit`.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_set_charge_rate_limit(
+    handle: *const FrameworkEcHandle,
+    rate_amps: f32,
+    battery_soc_percent: f32,
+) -> FrameworkStatus {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return status,
+    };
+    let soc = if battery_soc_percent < 0.0 {
+        None
+    } else {
+        Some(battery_soc_percent)
+    };
+    match controls::set_charge_rate_limit(&handle.ec, rate_amps, soc) {
+        Ok(()) => FrameworkStatus::success(),
+        Err(error) => status_from_error(error),
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcHibernateDelayResult {
+    pub status: FrameworkStatus,
+    pub seconds: u32,
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_hibernate_delay(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcHibernateDelayResult {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => {
+            return FrameworkEcHibernateDelayResult { status, seconds: 0 };
+        }
+    };
+    match controls::get_hibernate_delay(&handle.ec) {
+        Ok(seconds) => FrameworkEcHibernateDelayResult {
+            status: FrameworkStatus::success(),
+            seconds,
+        },
+        Err(error) => FrameworkEcHibernateDelayResult {
+            status: status_from_error(error),
+            seconds: 0,
+        },
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_set_hibernate_delay(
+    handle: *const FrameworkEcHandle,
+    seconds: u32,
+) -> FrameworkStatus {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return status,
+    };
+    match controls::set_hibernate_delay(&handle.ec, seconds) {
+        Ok(()) => FrameworkStatus::success(),
+        Err(error) => status_from_error(error),
+    }
+}
+
+#[no_mangle]
+/// Sets fingerprint LED brightness as a percentage.
+///
+/// The finer-grained counterpart to `framework_ec_set_fingerprint_led`, which takes
+/// a discrete level.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_set_fingerprint_led_percentage(
+    handle: *const FrameworkEcHandle,
+    percentage: u8,
+) -> FrameworkStatus {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return status,
+    };
+    match controls::set_fp_led_percentage(&handle.ec, percentage) {
+        Ok(()) => FrameworkStatus::success(),
+        Err(error) => status_from_error(error),
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcAdcResult {
+    pub status: FrameworkStatus,
+    pub channel: u8,
+    pub reserved: [u8; 3],
+    pub value: i32,
+}
+
+#[no_mangle]
+/// Reads a raw ADC channel.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_adc_read(
+    handle: *const FrameworkEcHandle,
+    channel: u8,
+) -> FrameworkEcAdcResult {
+    let fail = |status| FrameworkEcAdcResult {
+        status,
+        channel,
+        reserved: [0; 3],
+        value: 0,
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match controls::adc_read(&handle.ec, channel) {
+        Ok(value) => FrameworkEcAdcResult {
+            status: FrameworkStatus::success(),
+            channel,
+            reserved: [0; 3],
+            value,
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcCommandSupportResult {
+    pub status: FrameworkStatus,
+    pub command: u32,
+    pub version: u8,
+    /// 1 when the EC implements this command at this version.
+    pub supported: u8,
+    pub reserved: [u8; 2],
+}
+
+#[no_mangle]
+/// Probes whether the EC implements a host command at a given version.
+///
+/// Worth calling before the newer commands: support varies by platform and EC
+/// firmware revision, and this separates "not implemented" from "call failed".
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_command_version_supported(
+    handle: *const FrameworkEcHandle,
+    command: u32,
+    version: u8,
+) -> FrameworkEcCommandSupportResult {
+    let fail = |status| FrameworkEcCommandSupportResult {
+        status,
+        command,
+        version,
+        supported: 0,
+        reserved: [0; 2],
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match controls::command_version_supported(&handle.ec, command, version) {
+        Ok(supported) => FrameworkEcCommandSupportResult {
+            status: FrameworkStatus::success(),
+            command,
+            version,
+            supported: u8::from(supported),
+            reserved: [0; 2],
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PD power info and charging state
+// ---------------------------------------------------------------------------
+
+/// Power role a PD port has negotiated.
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkUsbPowerRole {
+    Disconnected = 0,
+    Source = 1,
+    Sink = 2,
+    SinkNotCharging = 3,
+}
+
+/// How the attached charger is supplying power.
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkUsbChargingType {
+    None = 0,
+    Pd = 1,
+    TypeC = 2,
+    Proprietary = 3,
+    Bc12Dcp = 4,
+    Bc12Cdp = 5,
+    Bc12Sdp = 6,
+    Other = 7,
+    VBus = 8,
+    Unknown = 9,
+}
+
+/// Charger negotiation state for one PD port.
+///
+/// Distinct from `FrameworkEcPdPortState` in the module inventory: that reports the
+/// Type-C link, this reports what the attached charger offers.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcPdPowerInfoResult {
+    pub status: FrameworkStatus,
+    pub port: u8,
+    /// 1 when the port supports dual-role power.
+    pub dualrole: u8,
+    pub reserved: [u8; 2],
+    pub role: FrameworkUsbPowerRole,
+    pub charging_type: FrameworkUsbChargingType,
+    pub voltage_max_mv: u16,
+    pub voltage_now_mv: u16,
+    pub current_max_ma: u16,
+    pub current_lim_ma: u16,
+    /// Maximum negotiated power in microwatts.
+    pub max_power_uw: u32,
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_pd_power_info(
+    handle: *const FrameworkEcHandle,
+    port: u8,
+) -> FrameworkEcPdPowerInfoResult {
+    let fail = |status| FrameworkEcPdPowerInfoResult {
+        status,
+        port,
+        dualrole: 0,
+        reserved: [0; 2],
+        role: FrameworkUsbPowerRole::Disconnected,
+        charging_type: FrameworkUsbChargingType::None,
+        voltage_max_mv: 0,
+        voltage_now_mv: 0,
+        current_max_ma: 0,
+        current_lim_ma: 0,
+        max_power_uw: 0,
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match pd::query_pd_power_info(&handle.ec, port) {
+        Ok(info) => FrameworkEcPdPowerInfoResult {
+            status: FrameworkStatus::success(),
+            port,
+            dualrole: u8::from(info.dualrole),
+            reserved: [0; 2],
+            role: match info.role {
+                1 => FrameworkUsbPowerRole::Source,
+                2 => FrameworkUsbPowerRole::Sink,
+                3 => FrameworkUsbPowerRole::SinkNotCharging,
+                _ => FrameworkUsbPowerRole::Disconnected,
+            },
+            charging_type: match info.charging_type {
+                1 => FrameworkUsbChargingType::Pd,
+                2 => FrameworkUsbChargingType::TypeC,
+                3 => FrameworkUsbChargingType::Proprietary,
+                4 => FrameworkUsbChargingType::Bc12Dcp,
+                5 => FrameworkUsbChargingType::Bc12Cdp,
+                6 => FrameworkUsbChargingType::Bc12Sdp,
+                7 => FrameworkUsbChargingType::Other,
+                8 => FrameworkUsbChargingType::VBus,
+                9 => FrameworkUsbChargingType::Unknown,
+                _ => FrameworkUsbChargingType::None,
+            },
+            voltage_max_mv: info.voltage_max_mv,
+            voltage_now_mv: info.voltage_now_mv,
+            current_max_ma: info.current_max_ma,
+            current_lim_ma: info.current_lim_ma,
+            max_power_uw: info.max_power_uw,
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcChargingStateResult {
+    pub status: FrameworkStatus,
+    pub is_charging: u8,
+    pub ac_present: u8,
+    pub reserved: [u8; 2],
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_is_charging(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcChargingStateResult {
+    let fail = |status| FrameworkEcChargingStateResult {
+        status,
+        is_charging: 0,
+        ac_present: 0,
+        reserved: [0; 2],
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match pd::is_charging(&handle.ec) {
+        Ok((ac_present, charging)) => FrameworkEcChargingStateResult {
+            status: FrameworkStatus::success(),
+            is_charging: u8::from(charging),
+            ac_present: u8::from(ac_present),
+            reserved: [0; 2],
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PD controller and retimer firmware versions
+// ---------------------------------------------------------------------------
+
+/// Which firmware image a PD controller is currently running.
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkPdFwMode {
+    Unknown = -1,
+    BootLoader = 0,
+    BackupFw = 1,
+    MainFw = 2,
+}
+
+/// Which application a PD controller firmware targets.
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkPdApplication {
+    Notebook = 0,
+    Monitor = 1,
+    AA = 2,
+    Invalid = 3,
+}
+
+/// Cypress base version, X.Y.Z.BB.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameworkPdBaseVersion {
+    pub major: u8,
+    pub minor: u8,
+    pub patch: u8,
+    pub reserved: [u8; 1],
+    pub build_number: u16,
+    pub reserved2: [u8; 2],
+}
+
+/// Cypress application version, X.Y.ZZ.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameworkPdAppVersion {
+    pub application: FrameworkPdApplication,
+    pub major: u8,
+    pub minor: u8,
+    pub circuit: u8,
+    pub reserved: [u8; 1],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameworkPdControllerVersion {
+    pub base: FrameworkPdBaseVersion,
+    pub app: FrameworkPdAppVersion,
+}
+
+/// All three firmware images on one PD controller.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameworkPdControllerFirmwares {
+    /// 0 when this controller slot is not populated on this platform.
+    pub present: u8,
+    pub reserved: [u8; 3],
+    pub active_fw: FrameworkPdFwMode,
+    pub bootloader: FrameworkPdControllerVersion,
+    pub backup_fw: FrameworkPdControllerVersion,
+    pub main_fw: FrameworkPdControllerVersion,
+}
+
+/// PD controller firmware versions.
+///
+/// Slot order follows upstream's probe order: 0 = Right01, 1 = Left23, 2 = Back.
+/// A laptop populates 0 and 1; the Desktop populates only 2. Check `present`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcPdControllerVersionsResult {
+    pub status: FrameworkStatus,
+    pub controller_count: u8,
+    pub reserved: [u8; 3],
+    pub controller_0: FrameworkPdControllerFirmwares,
+    pub controller_1: FrameworkPdControllerFirmwares,
+    pub controller_2: FrameworkPdControllerFirmwares,
+}
+
+fn default_pd_controller_version() -> FrameworkPdControllerVersion {
+    FrameworkPdControllerVersion {
+        base: FrameworkPdBaseVersion {
+            major: 0,
+            minor: 0,
+            patch: 0,
+            reserved: [0; 1],
+            build_number: 0,
+            reserved2: [0; 2],
+        },
+        app: FrameworkPdAppVersion {
+            application: FrameworkPdApplication::Invalid,
+            major: 0,
+            minor: 0,
+            circuit: 0,
+            reserved: [0; 1],
+        },
+    }
+}
+
+fn default_pd_controller_firmwares() -> FrameworkPdControllerFirmwares {
+    FrameworkPdControllerFirmwares {
+        present: 0,
+        reserved: [0; 3],
+        active_fw: FrameworkPdFwMode::Unknown,
+        bootloader: default_pd_controller_version(),
+        backup_fw: default_pd_controller_version(),
+        main_fw: default_pd_controller_version(),
+    }
+}
+
+#[no_mangle]
+/// Reads PD controller firmware versions.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_pd_controller_versions(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcPdControllerVersionsResult {
+    let fail = |status| FrameworkEcPdControllerVersionsResult {
+        status,
+        controller_count: 0,
+        reserved: [0; 3],
+        controller_0: default_pd_controller_firmwares(),
+        controller_1: default_pd_controller_firmwares(),
+        controller_2: default_pd_controller_firmwares(),
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    let set = match versions::pd_controller_versions(&handle.ec) {
+        Ok(set) => set,
+        Err(error) => return fail(status_from_error(error)),
+    };
+
+    let mut slots = [default_pd_controller_firmwares(); 3];
+    let mut count = 0u8;
+    for (slot, firmware) in slots.iter_mut().zip(set.controllers.iter()) {
+        let Some(firmware) = firmware else { continue };
+        count += 1;
+        *slot = FrameworkPdControllerFirmwares {
+            present: 1,
+            reserved: [0; 3],
+            active_fw: match firmware.active_fw {
+                framework_lib::ccgx::device::FwMode::BootLoader => FrameworkPdFwMode::BootLoader,
+                framework_lib::ccgx::device::FwMode::BackupFw => FrameworkPdFwMode::BackupFw,
+                framework_lib::ccgx::device::FwMode::MainFw => FrameworkPdFwMode::MainFw,
+            },
+            bootloader: into_pd_controller_version(&firmware.bootloader),
+            backup_fw: into_pd_controller_version(&firmware.backup_fw),
+            main_fw: into_pd_controller_version(&firmware.main_fw),
+        };
+    }
+
+    FrameworkEcPdControllerVersionsResult {
+        status: FrameworkStatus::success(),
+        controller_count: count,
+        reserved: [0; 3],
+        controller_0: slots[0],
+        controller_1: slots[1],
+        controller_2: slots[2],
+    }
+}
+
+fn into_pd_controller_version(
+    version: &framework_lib::ccgx::ControllerVersion,
+) -> FrameworkPdControllerVersion {
+    let (base, app) = versions::controller_version_parts(version);
+    let (b_major, b_minor, b_patch, build_number) = versions::base_version_parts(base);
+    let (application, a_major, a_minor, circuit) = versions::app_version_parts(app);
+
+    FrameworkPdControllerVersion {
+        base: FrameworkPdBaseVersion {
+            major: b_major,
+            minor: b_minor,
+            patch: b_patch,
+            reserved: [0; 1],
+            build_number,
+            reserved2: [0; 2],
+        },
+        app: FrameworkPdAppVersion {
+            application: match application {
+                0 => FrameworkPdApplication::Notebook,
+                1 => FrameworkPdApplication::Monitor,
+                2 => FrameworkPdApplication::AA,
+                _ => FrameworkPdApplication::Invalid,
+            },
+            major: a_major,
+            minor: a_minor,
+            circuit,
+            reserved: [0; 1],
+        },
+    }
+}
+
+/// Retimer firmware version bytes.
+///
+/// `version` is empty when the platform has no retimer. Release it with
+/// `framework_byte_buffer_free`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcRetimerVersionResult {
+    pub status: FrameworkStatus,
+    /// 1 when a retimer answered.
+    pub present: u8,
+    pub reserved: [u8; 3],
+    pub version: FrameworkByteBuffer,
+}
+
+#[no_mangle]
+/// The returned `version` buffer must be released with `framework_byte_buffer_free`.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_retimer_version(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcRetimerVersionResult {
+    let fail = |status| FrameworkEcRetimerVersionResult {
+        status,
+        present: 0,
+        reserved: [0; 3],
+        version: FrameworkByteBuffer::default(),
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match versions::retimer_version(&handle.ec) {
+        Ok(Some(version)) => FrameworkEcRetimerVersionResult {
+            status: FrameworkStatus::success(),
+            present: 1,
+            reserved: [0; 3],
+            version: FrameworkByteBuffer::from_vec(version),
+        },
+        Ok(None) => FrameworkEcRetimerVersionResult {
+            status: FrameworkStatus::success(),
+            present: 0,
+            reserved: [0; 3],
+            version: FrameworkByteBuffer::default(),
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Touchscreen and touchpad
+// ---------------------------------------------------------------------------
+
+/// Click force threshold on a haptic touchpad.
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkClickForce {
+    Low = 1,
+    Medium = 2,
+    High = 3,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkStylusBatteryResult {
+    pub status: FrameworkStatus,
+    /// Battery level in percent, valid only when `present` is 1.
+    pub level_percent: u8,
+    pub present: u8,
+    pub reserved: [u8; 2],
+}
+
+#[no_mangle]
+/// Reads the stylus battery level.
+///
+/// Talks to the touchscreen over HID, so it takes no EC handle. A success status
+/// with `present = 0` means no stylus is paired.
+pub extern "C" fn framework_get_stylus_battery() -> FrameworkStylusBatteryResult {
+    match peripherals::stylus_battery_level() {
+        Some(level) => FrameworkStylusBatteryResult {
+            status: FrameworkStatus::success(),
+            level_percent: level,
+            present: 1,
+            reserved: [0; 2],
+        },
+        None => FrameworkStylusBatteryResult {
+            status: FrameworkStatus::success(),
+            level_percent: 0,
+            present: 0,
+            reserved: [0; 2],
+        },
+    }
+}
+
+#[no_mangle]
+/// Enables or disables touchscreen input.
+///
+/// Talks to the touchscreen over HID, so it takes no EC handle.
+pub extern "C" fn framework_touchscreen_enable(enable: bool) -> FrameworkStatus {
+    if peripherals::enable_touchscreen(enable) {
+        FrameworkStatus::success()
+    } else {
+        FrameworkStatus::with(FrameworkStatusCode::DataUnavailable, 0)
+    }
+}
+
+#[no_mangle]
+/// Sets haptic feedback intensity on a haptic touchpad.
+///
+/// Write-only: the firmware accepts SET_FEATURE but never answers GET_FEATURE, so
+/// there is no matching read. Takes no EC handle.
+pub extern "C" fn framework_touchpad_set_haptic_intensity(intensity: u8) -> FrameworkStatus {
+    if peripherals::set_haptic_intensity(intensity) {
+        FrameworkStatus::success()
+    } else {
+        FrameworkStatus::with(FrameworkStatusCode::DataUnavailable, 0)
+    }
+}
+
+#[no_mangle]
+/// Sets the click force threshold on a haptic touchpad. Write-only, as above.
+pub extern "C" fn framework_touchpad_set_click_force(
+    force: FrameworkClickForce,
+) -> FrameworkStatus {
+    if peripherals::set_click_force(force) {
+        FrameworkStatus::success()
+    } else {
+        FrameworkStatus::with(FrameworkStatusCode::DataUnavailable, 0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard: RGB, remapping, PS/2 emulation
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+/// Sets per-key RGB colors starting at `start_key`.
+///
+/// `colors` points to `color_count * 3` bytes, three per key in R, G, B order.
+/// The EC accepts at most 64 keys per call.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library, and `colors` must
+/// point to at least `color_count * 3` readable bytes.
+pub unsafe extern "C" fn framework_ec_set_rgb_keyboard_colors(
+    handle: *const FrameworkEcHandle,
+    start_key: u8,
+    colors: *const u8,
+    color_count: i32,
+) -> FrameworkStatus {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return status,
+    };
+    if colors.is_null() {
+        return FrameworkStatus::with(FrameworkStatusCode::NullPointer, 0);
+    }
+    let Ok(count) = usize::try_from(color_count) else {
+        return FrameworkStatus::with(FrameworkStatusCode::InvalidArgument, color_count);
+    };
+
+    let bytes = std::slice::from_raw_parts(colors, count * 3);
+    let parsed = bytes
+        .chunks_exact(3)
+        .map(|rgb| framework_lib::chromium_ec::commands::RgbS {
+            r: rgb[0],
+            g: rgb[1],
+            b: rgb[2],
+        })
+        .collect();
+
+    match controls::set_rgb_keyboard_colors(&handle.ec, start_key, parsed) {
+        Ok(()) => FrameworkStatus::success(),
+        Err(error) => status_from_error(error),
+    }
+}
+
+#[no_mangle]
+/// Remaps the key at the given keyboard matrix position to a scan code.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_remap_key(
+    handle: *const FrameworkEcHandle,
+    row: u8,
+    col: u8,
+    scanset: u16,
+) -> FrameworkStatus {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return status,
+    };
+    match controls::remap_key(&handle.ec, row, col, scanset) {
+        Ok(()) => FrameworkStatus::success(),
+        Err(error) => status_from_error(error),
+    }
+}
+
+#[no_mangle]
+/// Remaps Caps Lock to Control.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_remap_caps_to_ctrl(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkStatus {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return status,
+    };
+    match controls::remap_caps_to_ctrl(&handle.ec) {
+        Ok(()) => FrameworkStatus::success(),
+        Err(error) => status_from_error(error),
+    }
+}
+
+#[no_mangle]
+/// Enables or disables PS/2 keyboard emulation.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_ps2_emulation_enable(
+    handle: *const FrameworkEcHandle,
+    enable: bool,
+) -> FrameworkStatus {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return status,
+    };
+    match controls::ps2_emulation_enable(&handle.ec, enable) {
+        Ok(()) => FrameworkStatus::success(),
+        Err(error) => status_from_error(error),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GPIO
+// ---------------------------------------------------------------------------
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcGpioValueResult {
+    pub status: FrameworkStatus,
+    pub value: u8,
+    pub reserved: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcGpioCountResult {
+    pub status: FrameworkStatus,
+    pub count: u8,
+    pub reserved: [u8; 3],
+}
+
+/// One GPIO's name, level and flags.
+///
+/// The `name` buffer must be released with `framework_byte_buffer_free`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcGpioInfoResult {
+    pub status: FrameworkStatus,
+    pub index: u8,
+    pub value: u8,
+    pub reserved: [u8; 2],
+    pub flags: u32,
+    pub name: FrameworkByteBuffer,
+}
+
+#[no_mangle]
+/// Reads a GPIO by name. `name` is `name_length` bytes of UTF-8, not NUL-terminated.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library, and `name` must point
+/// to at least `name_length` readable bytes.
+pub unsafe extern "C" fn framework_ec_get_gpio(
+    handle: *const FrameworkEcHandle,
+    name: *const u8,
+    name_length: i32,
+) -> FrameworkEcGpioValueResult {
+    let fail = |status| FrameworkEcGpioValueResult {
+        status,
+        value: 0,
+        reserved: [0; 3],
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    let name = match borrow_utf8(name, name_length) {
+        Ok(name) => name,
+        Err(status) => return fail(status),
+    };
+
+    match controls::get_gpio(&handle.ec, name) {
+        Ok(value) => FrameworkEcGpioValueResult {
+            status: FrameworkStatus::success(),
+            value: u8::from(value),
+            reserved: [0; 3],
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+#[no_mangle]
+/// Writes a GPIO by name. `name` is `name_length` bytes of UTF-8, not NUL-terminated.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library, and `name` must point
+/// to at least `name_length` readable bytes.
+pub unsafe extern "C" fn framework_ec_set_gpio(
+    handle: *const FrameworkEcHandle,
+    name: *const u8,
+    name_length: i32,
+    value: bool,
+) -> FrameworkStatus {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return status,
+    };
+    let name = match borrow_utf8(name, name_length) {
+        Ok(name) => name,
+        Err(status) => return status,
+    };
+
+    match controls::set_gpio(&handle.ec, name, value) {
+        Ok(()) => FrameworkStatus::success(),
+        Err(error) => status_from_error(error),
+    }
+}
+
+#[no_mangle]
+/// Number of GPIOs the EC exposes. Pair with `framework_ec_get_gpio_info`.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_gpio_count(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcGpioCountResult {
+    let fail = |status| FrameworkEcGpioCountResult {
+        status,
+        count: 0,
+        reserved: [0; 3],
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match controls::gpio_count(&handle.ec) {
+        Ok(count) => FrameworkEcGpioCountResult {
+            status: FrameworkStatus::success(),
+            count,
+            reserved: [0; 3],
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+#[no_mangle]
+/// Reads one GPIO by index, in `0..framework_ec_get_gpio_count`.
+///
+/// The returned `name` buffer must be released with `framework_byte_buffer_free`.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_gpio_info(
+    handle: *const FrameworkEcHandle,
+    index: u8,
+) -> FrameworkEcGpioInfoResult {
+    let fail = |status| FrameworkEcGpioInfoResult {
+        status,
+        index,
+        value: 0,
+        reserved: [0; 2],
+        flags: 0,
+        name: FrameworkByteBuffer::default(),
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match controls::gpio_info_at(&handle.ec, index) {
+        Ok(info) => FrameworkEcGpioInfoResult {
+            status: FrameworkStatus::success(),
+            index,
+            value: u8::from(info.value),
+            reserved: [0; 2],
+            flags: info.flags,
+            name: FrameworkByteBuffer::from_vec(info.name.into_bytes()),
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GPU serial
+// ---------------------------------------------------------------------------
+
+/// The expansion-bay GPU serial. Release `serial` with `framework_byte_buffer_free`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcGpuSerialResult {
+    pub status: FrameworkStatus,
+    pub serial: FrameworkByteBuffer,
+}
+
+#[no_mangle]
+/// Reads the expansion-bay GPU serial.
+///
+/// The returned `serial` buffer must be released with `framework_byte_buffer_free`.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_gpu_serial(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcGpuSerialResult {
+    let fail = |status| FrameworkEcGpuSerialResult {
+        status,
+        serial: FrameworkByteBuffer::default(),
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match controls::get_gpu_serial(&handle.ec) {
+        Ok(serial) => FrameworkEcGpuSerialResult {
+            status: FrameworkStatus::success(),
+            serial: FrameworkByteBuffer::from_vec(serial.into_bytes()),
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+// The GPU serial write path is deliberately not exposed. Programming the serial
+// changes persistent expansion-bay state, and upstream's `set_gpu_serial` copies
+// into a fixed slice without checking the length. Only the read path is exported.
+
+// ---------------------------------------------------------------------------
+// Peripheral firmware versions
+// ---------------------------------------------------------------------------
+
+/// Maximum peripherals reported per category by `framework_get_*_versions`.
+pub const FRAMEWORK_PERIPHERAL_SLOT_COUNT: usize = 8;
+
+/// One USB peripheral and the firmware version it reports.
+///
+/// For camera, input module and USB hub this is the USB `bcdDevice` field; for the
+/// audio card it comes from the Synaptics CAPE version command.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkPeripheralVersion {
+    /// 0 when this slot is empty.
+    pub present: u8,
+    pub version_major: u8,
+    pub version_minor: u8,
+    pub version_sub_minor: u8,
+    pub vendor_id: u16,
+    pub product_id: u16,
+    /// USB product string; empty when the device could not be opened.
+    pub product_name: FrameworkByteBuffer,
+}
+
+/// Up to eight peripherals of one category.
+///
+/// Release with `framework_peripheral_versions_free`; do not free the individual
+/// `product_name` buffers.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkPeripheralVersionsResult {
+    pub status: FrameworkStatus,
+    pub count: u8,
+    pub reserved: [u8; 3],
+    pub peripheral_0: FrameworkPeripheralVersion,
+    pub peripheral_1: FrameworkPeripheralVersion,
+    pub peripheral_2: FrameworkPeripheralVersion,
+    pub peripheral_3: FrameworkPeripheralVersion,
+    pub peripheral_4: FrameworkPeripheralVersion,
+    pub peripheral_5: FrameworkPeripheralVersion,
+    pub peripheral_6: FrameworkPeripheralVersion,
+    pub peripheral_7: FrameworkPeripheralVersion,
+}
+
+fn default_peripheral_version() -> FrameworkPeripheralVersion {
+    FrameworkPeripheralVersion {
+        present: 0,
+        version_major: 0,
+        version_minor: 0,
+        version_sub_minor: 0,
+        vendor_id: 0,
+        product_id: 0,
+        product_name: FrameworkByteBuffer::default(),
+    }
+}
+
+fn peripheral_versions_result(
+    found: Vec<versions::PeripheralVersion>,
+) -> FrameworkPeripheralVersionsResult {
+    let mut slots = [default_peripheral_version(); FRAMEWORK_PERIPHERAL_SLOT_COUNT];
+    let mut count = 0u8;
+    for (slot, peripheral) in slots.iter_mut().zip(found) {
+        *slot = FrameworkPeripheralVersion {
+            present: 1,
+            version_major: peripheral.version.major,
+            version_minor: peripheral.version.minor,
+            version_sub_minor: peripheral.version.sub_minor,
+            vendor_id: peripheral.vendor_id,
+            product_id: peripheral.product_id,
+            product_name: FrameworkByteBuffer::from_vec(peripheral.product_name.into_bytes()),
+        };
+        count += 1;
+    }
+
+    FrameworkPeripheralVersionsResult {
+        status: FrameworkStatus::success(),
+        count,
+        reserved: [0; 3],
+        peripheral_0: slots[0],
+        peripheral_1: slots[1],
+        peripheral_2: slots[2],
+        peripheral_3: slots[3],
+        peripheral_4: slots[4],
+        peripheral_5: slots[5],
+        peripheral_6: slots[6],
+        peripheral_7: slots[7],
+    }
+}
+
+#[no_mangle]
+/// Firmware versions of connected Framework cameras.
+///
+/// Enumerates USB directly, so it takes no EC handle. Release the result with
+/// `framework_peripheral_versions_free`.
+pub extern "C" fn framework_get_camera_versions() -> FrameworkPeripheralVersionsResult {
+    peripheral_versions_result(versions::camera_versions())
+}
+
+#[no_mangle]
+/// Firmware versions of connected Framework 16 input modules, including the LED matrix.
+///
+/// Release the result with `framework_peripheral_versions_free`.
+pub extern "C" fn framework_get_input_module_versions() -> FrameworkPeripheralVersionsResult {
+    peripheral_versions_result(versions::input_module_versions())
+}
+
+#[no_mangle]
+/// Firmware versions of the Realtek and Genesys USB hubs used on Framework systems.
+///
+/// Release the result with `framework_peripheral_versions_free`.
+pub extern "C" fn framework_get_usb_hub_versions() -> FrameworkPeripheralVersionsResult {
+    peripheral_versions_result(versions::usb_hub_versions())
+}
+
+#[no_mangle]
+/// Firmware version of the audio expansion card.
+///
+/// Unlike the other peripherals this needs a Synaptics CAPE exchange over HID
+/// control transfers, which claims the interface for the duration of the call.
+/// Release the result with `framework_peripheral_versions_free`.
+pub extern "C" fn framework_get_audio_card_version() -> FrameworkPeripheralVersionsResult {
+    peripheral_versions_result(versions::audio_card_version().into_iter().collect())
+}
+
+#[no_mangle]
+/// Releases every buffer owned by a `FrameworkPeripheralVersionsResult`.
+///
+/// # Safety
+/// `result` must point to a record returned by one of the
+/// `framework_get_*_version(s)` functions that has not already been freed.
+/// Passing null is a no-op.
+pub unsafe extern "C" fn framework_peripheral_versions_free(
+    result: *mut FrameworkPeripheralVersionsResult,
+) {
+    if result.is_null() {
+        return;
+    }
+
+    let result = &mut *result;
+    for peripheral in [
+        &mut result.peripheral_0,
+        &mut result.peripheral_1,
+        &mut result.peripheral_2,
+        &mut result.peripheral_3,
+        &mut result.peripheral_4,
+        &mut result.peripheral_5,
+        &mut result.peripheral_6,
+        &mut result.peripheral_7,
+    ] {
+        let owned = peripheral.product_name;
+        peripheral.product_name = FrameworkByteBuffer::default();
+        owned.destroy();
+    }
+}
+
+/// An NVMe drive's identity strings. Release both buffers with
+/// `framework_byte_buffer_free`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkNvmeVersionResult {
+    pub status: FrameworkStatus,
+    pub model_number: FrameworkByteBuffer,
+    pub firmware_version: FrameworkByteBuffer,
+}
+
+#[no_mangle]
+/// Reads an NVMe drive's model number and firmware version.
+///
+/// `device_path` is `path_length` bytes of UTF-8, not NUL-terminated, naming the
+/// device node (for example `/dev/nvme0`).
+///
+/// **Linux only.** The readback issues an NVMe admin passthrough ioctl, which
+/// upstream gates behind `#[cfg(target_os = "linux")]`; every other platform
+/// returns `NotSupported`.
+///
+/// # Safety
+/// `device_path` must point to at least `path_length` readable bytes.
+pub unsafe extern "C" fn framework_get_nvme_version(
+    device_path: *const u8,
+    path_length: i32,
+) -> FrameworkNvmeVersionResult {
+    let fail = |status| FrameworkNvmeVersionResult {
+        status,
+        model_number: FrameworkByteBuffer::default(),
+        firmware_version: FrameworkByteBuffer::default(),
+    };
+    if !versions::NVME_SUPPORTED {
+        return fail(FrameworkStatus::with(FrameworkStatusCode::NotSupported, 0));
+    }
+    let path = match borrow_utf8(device_path, path_length) {
+        Ok(path) => path,
+        Err(status) => return fail(status),
+    };
+
+    match versions::nvme_version(path) {
+        Some(info) => FrameworkNvmeVersionResult {
+            status: FrameworkStatus::success(),
+            model_number: FrameworkByteBuffer::from_vec(info.model_number.into_bytes()),
+            firmware_version: FrameworkByteBuffer::from_vec(info.firmware_version.into_bytes()),
+        },
+        None => fail(FrameworkStatus::with(
+            FrameworkStatusCode::DataUnavailable,
+            0,
+        )),
+    }
+}
+
+/// Borrows a caller-provided UTF-8 string given as pointer plus length.
+///
+/// # Safety
+/// `ptr` must point to at least `length` readable bytes, or be null.
+unsafe fn borrow_utf8<'a>(ptr: *const u8, length: i32) -> Result<&'a str, FrameworkStatus> {
+    if ptr.is_null() {
+        return Err(FrameworkStatus::with(FrameworkStatusCode::NullPointer, 0));
+    }
+    let length = usize::try_from(length)
+        .map_err(|_| FrameworkStatus::with(FrameworkStatusCode::InvalidArgument, length))?;
+
+    std::str::from_utf8(std::slice::from_raw_parts(ptr, length))
+        .map_err(|_| FrameworkStatus::with(FrameworkStatusCode::InvalidArgument, length as i32))
+}
+
+// ---------------------------------------------------------------------------
+// Smart Battery (SBS)
+// ---------------------------------------------------------------------------
+
+/// Full Smart Battery data set read over I2C passthrough.
+///
+/// All five text/blob buffers are owned by the caller. Release the whole record
+/// with `framework_smart_battery_data_free`; do not free the individual buffers.
+///
+/// Fields in the unsealed group (`state_of_health`, `operation_status`,
+/// `safety_alert`, `safety_status`, `pf_alert`, `pf_status`, `lifetime_1`
+/// through `lifetime_5`) are only populated when an unseal key was supplied and
+/// accepted; check `unsealed`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkSmartBatteryData {
+    /// SBS BatteryMode register.
+    pub mode: u16,
+    pub serial_number: u16,
+    /// Raw packed SBS ManufactureDate word.
+    pub manufacture_date_raw: u16,
+    pub manufacture_year: u16,
+    pub manufacture_month: u8,
+    pub manufacture_day: u8,
+    /// Tenths of a Kelvin: degrees Celsius = value / 10 - 273.15.
+    pub temperature_decikelvin: u16,
+    pub voltage_mv: u16,
+    pub cell_voltage_1_mv: u16,
+    pub cell_voltage_2_mv: u16,
+    pub cell_voltage_3_mv: u16,
+    pub cell_voltage_4_mv: u16,
+    pub cycle_count: u16,
+    /// Signed: negative while discharging.
+    pub current_ma: i16,
+    pub avg_current_ma: i16,
+    pub rel_state_of_charge: u16,
+    pub abs_state_of_charge: u16,
+    pub remaining_capacity: u16,
+    pub full_charge_capacity: u16,
+    pub charging_current_ma: i16,
+    pub charging_voltage_mv: u16,
+    /// SBS BatteryStatus register.
+    pub battery_status: u16,
+    pub design_capacity: u16,
+    pub design_voltage_mv: u16,
+    pub operation_status: u32,
+    pub safety_alert: u32,
+    pub safety_status: u32,
+    pub pf_alert: u32,
+    pub pf_status: u32,
+    /// 1 when the unsealed register group was read successfully.
+    pub unsealed: u8,
+    pub reserved: [u8; 3],
+    pub device_name: FrameworkByteBuffer,
+    pub manufacturer_name: FrameworkByteBuffer,
+    pub device_chemistry: FrameworkByteBuffer,
+    /// Raw state-of-health block; first two LE u16s are mAh and cWh.
+    pub state_of_health: FrameworkByteBuffer,
+    /// Raw MAC 0x0002 response: subcmd echo, device number, firmware version, build.
+    pub firmware_version: FrameworkByteBuffer,
+    pub lifetime_1: FrameworkByteBuffer,
+    pub lifetime_2: FrameworkByteBuffer,
+    pub lifetime_3: FrameworkByteBuffer,
+    pub lifetime_4: FrameworkByteBuffer,
+    pub lifetime_5: FrameworkByteBuffer,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcSmartBatteryResult {
+    pub status: FrameworkStatus,
+    pub data: FrameworkSmartBatteryData,
+}
+
+#[no_mangle]
+/// Reads the full Smart Battery data set.
+///
+/// This performs many I2C passthrough round trips and is far slower than
+/// `framework_ec_get_power_snapshot`; call it on demand, not in a poll loop.
+///
+/// Set `use_unseal_key` to a non-zero value to unlock the manufacturer-access
+/// registers using `unseal_key`; pass zero to read only the sealed-mode subset.
+///
+/// The returned record must be released with `framework_smart_battery_data_free`.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_smart_battery_data(
+    handle: *const FrameworkEcHandle,
+    use_unseal_key: u8,
+    unseal_key: u32,
+) -> FrameworkEcSmartBatteryResult {
+    let fail = |status| FrameworkEcSmartBatteryResult {
+        status,
+        data: smart_battery::default_ffi(),
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    let key = if use_unseal_key != 0 {
+        Some(unseal_key)
+    } else {
+        None
+    };
+    match smart_battery::collect(&handle.ec, key) {
+        Ok(data) => FrameworkEcSmartBatteryResult {
+            status: FrameworkStatus::success(),
+            data: smart_battery::into_ffi(data),
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+#[no_mangle]
+/// Releases every buffer owned by a `FrameworkSmartBatteryData`.
+///
+/// # Safety
+/// `data` must point to a record returned by
+/// `framework_ec_get_smart_battery_data` that has not already been freed.
+/// Passing null is a no-op.
+pub unsafe extern "C" fn framework_smart_battery_data_free(data: *mut FrameworkSmartBatteryData) {
+    if data.is_null() {
+        return;
+    }
+
+    let data = &mut *data;
+    for buffer in [
+        &mut data.device_name,
+        &mut data.manufacturer_name,
+        &mut data.device_chemistry,
+        &mut data.state_of_health,
+        &mut data.firmware_version,
+        &mut data.lifetime_1,
+        &mut data.lifetime_2,
+        &mut data.lifetime_3,
+        &mut data.lifetime_4,
+        &mut data.lifetime_5,
+    ] {
+        let owned = *buffer;
+        *buffer = FrameworkByteBuffer::default();
+        owned.destroy();
+    }
 }

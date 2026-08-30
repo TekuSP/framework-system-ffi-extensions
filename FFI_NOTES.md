@@ -104,11 +104,48 @@ control layer:
   Framework 16 input modules, touchpad, fingerprint reader, touchscreen, webcam,
   and expansion bay presence
 - structured status and device error reporting
+- EC thermal thresholds read and write per sensor (warn / high / halt, their release
+  points, and the `fan_off` / `fan_max` temperatures)
+- EC-reported temperature sensor names and sensor type tags, with the name resolved onto
+  the stable `FrameworkSensorName` enum
+- AP throttle status (soft and hard)
+- battery cutoff (ship mode) status
+- EC switch positions (lid open, power button, write protect, dedicated recovery)
+- EC `hello` liveness echo and a `check_hello` convenience wrapper
+- EC host command protocol info (supported versions, max packet sizes)
+- EC sysinfo (current image, reset flags, sysinfo flags)
+- saved EC panic data as a raw blob with decoded header/trailer fields
+- port 80 POST code history
+- full Smart Battery (SBS) data set, including chemistry, manufacture date, cycle count,
+  per-cell voltages, safety/PF status words and the lifetime blocks when unsealed
+- Smart Battery SHA-1 HMAC authentication challenge
+- PD controller firmware versions (bootloader, backup and main images per controller)
+- PD charger info per port (role, charging type, voltage/current limits, max power)
+- charging and AC-present state
+- retimer firmware version
+- EC-reported fan count
+- standalone (batteryless Desktop) mode state
+- charge rate limit write
+- EC hibernate delay read and write
+- fingerprint LED percentage write
+- raw ADC channel read
+- host command version probing
+- stylus battery level
+- touchscreen enable/disable
+- touchpad haptic intensity and click force (write-only)
+- per-key RGB keyboard colors
+- key remapping and Caps-to-Ctrl
+- PS/2 emulation toggle
+- GPIO read, write, and enumeration by index
+- expansion-bay GPU serial read (the write path is deliberately not exposed)
+- firmware versions for cameras, Framework 16 input modules, USB hubs and the audio card
+- NVMe model and firmware version (Linux only)
 
-The current FFI still does **not** expose an implemented EC fan-table or max-fan-RPM
-reader. The repo currently reads live fan RPM and can set a target RPM/duty, but the
-"limited by EC fan table max RPM" behavior remains firmware-enforced rather than a
-separate readable FFI value.
+The current FFI still does **not** expose a max-fan-RPM reader. The `fan_off` / `fan_max`
+values now readable through `framework_ec_get_thermal_thresholds` are the *temperature*
+setpoints at which the EC starts and maxes active cooling — they are not RPM limits. The
+repo reads live fan RPM and can set a target RPM/duty, but the "limited by EC fan table max
+RPM" behavior remains firmware-enforced rather than a separate readable FFI value.
 
 ## Missing Features
 
@@ -116,33 +153,33 @@ Compared with the full `framework-system` repo and CLI, the major missing areas 
 
 ### Charger and Battery Controls
 
-- charge rate limit
-- other charger-oriented control surfaces
+Nothing outstanding. Charge limits, charge current limit, charge rate limit, cutoff
+status, charging/AC state and the full Smart Battery data set are all exposed.
 
 ### Sensors and Switch State
 
-- ambient light sensor values
-- accelerometer data and lid angle
-- stylus battery reporting
-- EC uptime and S0ix counters
-- board ID reporting
+Nothing outstanding. Ambient light, accelerometer/lid angle, EC uptime, S0ix counters,
+board ID, EC switch positions, AP throttle status, raw ADC channels and stylus battery
+are all exposed.
 
 ### USB-C and PD Management
 
-- PD controller information
 - PD reset/disable/enable operations
 - Chromebook-style PD info surfaces
+- PD bus locking (`lock_pd_bus`) — deliberately unexposed, see below
+
+PD controller firmware versions, per-port charger info and retimer versions are exposed now.
 - USB-C expansion card VID/PID confirmation: SD (`0x05E3:0x0749`) and MicroSD (`0x05E3:0x0751`) PIDs are Genesys Logic reader candidates; confidence is DerivedWeak pending hardware testing against actual Framework cards
 - USB-C passive cards (USB-C expansion card, DP 2nd Gen passthrough, HDMI 3rd Gen Parade PS186) have no USB presence; they remain Unknown/DerivedWeak with no slot disambiguation path currently
 
 ### Device and Platform Controls
 
-- broader keyboard backlight control surface
-- fingerprint LED write/control surface
-- tablet mode override
-- touchscreen enable/disable
-- input deck mode control
-- NVIDIA-related status on supported systems
+- NVIDIA-related status on supported systems (upstream gates this behind its optional
+  `nvidia` feature and `nvml-wrapper`, which this crate does not enable)
+
+Fingerprint LED level and percentage, tablet mode override, input deck mode, touchscreen
+enable/disable, touchpad haptics and click force, per-key RGB, key remapping, PS/2
+emulation, GPIO access and hibernate delay are all exposed now.
 
 ### Firmware and Binary Tooling
 
@@ -153,32 +190,120 @@ Compared with the full `framework-system` repo and CLI, the major missing areas 
 - capsule parsing
 - EC reboot and image-jump controls
 - EC flash dumping and flashing
+- structured decoding of the panic blob (`framework_ec_get_panic_info` returns the raw
+  `struct panic_data` plus header/trailer fields; upstream's `chromium_ec::panic` keeps its
+  per-architecture decode structs private, so only `print_panic_info` exists there)
 
 ### Expansion Card and Peripheral Support
 
-- richer DisplayPort and HDMI expansion card details and update flows
-- richer audio card info
-- retimer and other peripheral-oriented surfaces
+- DisplayPort and HDMI expansion card update flows
+- audio card detail beyond the firmware version
+
+Camera, input module, USB hub and audio card firmware versions, retimer version and
+NVMe model/firmware are exposed now. Note the NVMe path is **Linux only**: upstream gates
+`framework_lib::nvme` behind `#[cfg(target_os = "linux")]` because it issues an NVMe admin
+passthrough ioctl, so other platforms get `FrameworkStatusCode::NotSupported`.
 
 ### Raw and Advanced Escape Hatches
 
 - generic host command bridge
-- GPIO access
 - more direct feature-query surfaces
+- EC console read (`console_read_one` returns a `String` and would be cheap to add)
+- full memmap dump (`dump_mem_region`)
 - self-test style operations
+
+GPIO read, write and enumeration are exposed now, as is host command version probing.
 
 ## Highest-Value Next Features
 
 For a .NET application focused on fan curves, system telemetry, and machine status,
-the highest-value additions are likely:
+the highest-value remaining additions are likely:
 
-1. charge-limit and charger-related APIs
-2. a generic feature-query API
-3. privacy, intrusion, and other switch/sensor state APIs
-4. keyboard backlight and similar user-facing device controls
-5. a raw host-command escape hatch if fast parity matters more than a curated ABI
+1. a generic feature-query API (the current surface exposes a compact curated flag set)
+2. a raw host-command escape hatch if fast parity matters more than a curated ABI
+3. a max-fan-RPM reader, so managed fan curves can normalise duty against the real ceiling
+4. ESRT, for firmware inventory and update status
+5. structured panic decoding, if EC crash triage moves into the managed app
+6. EC console read and memmap dump, both cheap, for diagnostics
+
+## Deliberately Not Exposed
+
+These upstream capabilities are reachable but intentionally left out of the ABI. Exposing
+them through a .NET interop layer puts destructive firmware operations one P/Invoke away
+from any managed caller, with no confirmation path and no way to recover a bricked EC.
+
+- **EC flash**: `reflash`, `read_ec_flash`, `get_entire_ec_flash`, `protect_ec_flash`,
+  `test_ec_flash_read`, `flash_notify`
+- **EC reboot and image jump**: `reboot`, `reboot_ec`, `jump_ro`, `jump_rw`,
+  `disable_jump`, `cancel_jump`
+- **GPU descriptor and serial writing**: `set_gpu_descriptor`, `write_ec_gpu_chunk`,
+  `set_gpu_serial`. The descriptor *read* and *validate* paths are exposed, as is
+  `framework_ec_get_gpu_serial` — only the write paths are withheld. Programming a serial
+  changes persistent expansion-bay identity, and upstream's `set_gpu_serial` copies into a
+  fixed slice without checking the length.
+- **Retimer firmware update mode**: `retimer_enable_fwupd`, `retimer_enable_compliance`
+- **PD bus locking**: `lock_pd_bus`
+
+Also left out, for a different reason: the `ec_binary`, `capsule` and `ccgx::binary`
+parsers operate on file bytes rather than hardware, so they are pure functions the managed
+side can implement directly without crossing the FFI boundary. The `smart_battery` file and
+console helpers are skipped on the same grounds.
 
 ## Submodule Update History
+
+### 2026-08-30: framework-system 39f0f89 → a338c6a (v0.6.5-19)
+
+38 upstream commits. **No breaking changes** — every change to the `framework_lib`
+surface this crate consumes was additive, and the crate compiled against the new
+submodule with no source edits required.
+
+**Upstream additions that mattered:**
+
+- `CrosEc::get_temp_sensor_name(id)` — EC firmware now reports sensor names, and upstream
+  **deleted** the hardcoded per-platform sensor table that our `thermal::sensor_name()`
+  mirrors (`7c3e552 --thermal: Remove hardcoded names`)
+- `CrosEc::get_thermal_threshold` / `set_thermal_threshold` and `EcThermalConfig`
+  (warn/high/halt plus `temp_fan_off`/`temp_fan_max`)
+- `CrosEc::get_ap_throttle_status()` — soft/hard AP throttle
+- `CrosEc::hello()` / `check_hello()`, `get_protocol_info()`, `get_panic_info()`,
+  `port80_read()`, and the `chromium_ec::panic` module
+- `EcRequestSysinfo` plus `SysinfoFlag` (upstream's `get_sysinfo()` only prints)
+- `power::get_cutoff_status()` — battery ship-mode state
+- `power::print_switches()` and a now-public `EC_MEMMAP_SWITCHES` read path
+- the `smart_battery` module: `SmartBattery::collect_data(ec, unseal_key) -> BatteryData`
+  and `SmartBattery::authenticate_battery(ec, &[u8; 16]) -> bool`
+- MEC/NPC EC flash layout corrections and `ccgx` byte-literal cleanups (no FFI impact)
+
+**FFI impact: 15 new exported functions.** See the Current Scope list below. The existing
+ABI was **not** changed — no struct layouts moved, no enum values were renumbered, and no
+functions were removed or resigned. Everything new is additive, so existing managed callers
+keep working after regenerating bindings.
+
+**Sensor naming decision.** `thermal::sensor_name()` keeps the static per-platform table
+even though upstream dropped its copy: it costs no host commands, so the polled thermal
+snapshot stays cheap. The authoritative firmware name is exposed separately through
+`framework_ec_get_temp_sensor_name`, which also resolves the name onto the stable
+`FrameworkSensorName` enum via `thermal::map_sensor_name`. Managed callers should read
+names once, cache them, and keep polling the snapshot for values.
+
+That entry point sends `EcRequestTempSensorGetInfo` directly rather than calling upstream's
+`CrosEc::get_temp_sensor_name`, because the helper discards the `sensor_type` byte the EC
+returns in the same response. One command, both halves.
+
+**Not mirrored from upstream.** `smart_battery`'s file and console helpers
+(`BatteryData::write_to_file` / `read_from_file`, `dump_data`, `dump_to_file`,
+`display_battery_data`, `analyze_health`, `interactive_authenticate`) stay unexposed by
+design: they are persistence and stdout concerns that belong in the managed layer, and the
+underlying values they format are all reachable through `framework_ec_get_smart_battery_data`.
+Upstream's other new printing helpers (`print_thermal_thresholds`, `print_switches`,
+`print_panic_info`, `get_sysinfo`) are likewise superseded by the structured readbacks.
+
+**Toolchain note.** Upstream's new `smart_battery.rs` trips the `io_other_error` lint on
+current stable clippy. `framework_lib` is a path dependency, so clippy treats it as a local
+package and `cargo clippy -- -D warnings` fails on upstream's lint debt. CI now runs
+`cargo clippy --no-deps --all-targets -- -D warnings` to keep the gate on this crate.
+
+Build, fmt, clippy, and the 13 unit tests all pass after the update.
 
 ### 2026-06-23: framework-system 993cb6b → 39f0f89 (v0.6.4)
 
@@ -231,6 +356,14 @@ The `Laptop 13 Pro (Intel Core Ultra Series 3)` SMBIOS string mapping (→ `Plat
   after its contents have been copied.
 - This applies to nested buffers too, such as battery text fields, flash version
   strings, and raw GPU descriptor blobs.
+- Once a record carries more than a handful of buffers, a dedicated aggregate free is
+  better than making the managed side walk every field. `FrameworkSmartBatteryData` owns
+  ten buffers and is released with `framework_smart_battery_data_free`, which nulls each
+  field as it frees so a double call is harmless. Records with one or two buffers stay on
+  the plain `framework_byte_buffer_free` convention.
+- Per-call cost belongs in the ABI shape, not just the docs. EC-reported temperature sensor
+  names cost one host command each, so they are a separate `framework_ec_get_temp_sensor_name`
+  call rather than eight extra buffers on every polled thermal snapshot.
 
 ### Status and Error Reporting
 
@@ -238,6 +371,34 @@ The `Laptop 13 Pro (Intel Core Ultra Series 3)` SMBIOS string mapping (→ `Plat
   low-level interop layer without handwritten glue.
 - Device error messages are better exposed indirectly through a token plus retrieval API
   than discarded into a generic error code.
+
+### Panic Safety Across the Boundary
+
+- **A panic in Rust aborts the managed host.** Several upstream helpers `unwrap()` on
+  device errors or index fixed slices without checking, which is fine for a CLI that
+  crashes with a message and unacceptable for a library loaded into a long-running app.
+  Wrap or re-implement rather than calling them directly.
+- Cases found so far: `CrosEc::get_gpu_serial` (`String::from_utf8(..).unwrap()`),
+  `audio_card::check_synaptics_fw_version` (`unwrap()` on device open plus an
+  `assert_eq!` on the HID reply), and the `camera` / `usbhub` / `inputmodule` version
+  helpers (`rusb::devices().unwrap()`). `CrosEc::set_gpu_serial` has the same problem
+  (`copy_from_slice` on a serial that must be exactly 18 bytes), but it is not exposed at
+  all — see Deliberately Not Exposed.
+- Unbounded waits are the same class of problem. Upstream's audio card version loop spins
+  until the card replies; `versions::audio_card_version` bounds it instead so a wedged
+  card cannot hang the calling thread.
+- When re-implementing, keep upstream's protocol semantics exactly and change only the
+  error handling — the point is to return a `FrameworkStatus`, not to behave differently.
+
+### Platform Availability
+
+- Some upstream modules are `cfg`-gated and simply do not exist on every target that CI
+  builds. `framework_lib::nvme` is `#[cfg(target_os = "linux")]`, so `framework_get_nvme_version`
+  compiles to a stub elsewhere.
+- `FrameworkStatusCode::NotSupported` exists to distinguish "this build cannot do that on
+  this platform" from `DataUnavailable`, which means the capability is present but did not
+  answer. Managed callers should treat the former as a permanent capability gap and the
+  latter as a transient read failure.
 
 ### Upstream Compatibility
 

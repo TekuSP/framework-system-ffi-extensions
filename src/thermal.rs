@@ -1,5 +1,6 @@
-use framework_lib::chromium_ec::commands::EcFeatureCode;
-use framework_lib::chromium_ec::{CrosEc, CrosEcDriver};
+use framework_lib::chromium_ec::commands::{EcFeatureCode, EcRequestTempSensorGetInfo};
+use framework_lib::chromium_ec::{CrosEc, CrosEcDriver, EcRequestRaw};
+use framework_lib::power;
 use framework_lib::smbios;
 use framework_lib::smbios::Platform;
 use framework_lib::smbios::PlatformFamily;
@@ -9,6 +10,7 @@ use crate::{
     FrameworkFanFeaturesState, FrameworkFanName, FrameworkFanReading, FrameworkFanState,
     FrameworkPowerSnapshot, FrameworkPowerSourceState, FrameworkSensorName, FrameworkStatus,
     FrameworkTemperatureReading, FrameworkTemperatureState, FrameworkThermalSnapshot,
+    FrameworkThermalThresholdFlag, FrameworkThermalThresholds,
 };
 
 const THERMAL_SENSOR_COUNT: usize = 8;
@@ -403,4 +405,217 @@ pub(crate) fn build_thermal_snapshot(ec: &CrosEc) -> Option<FrameworkThermalSnap
             name: fan_name(3, family),
         },
     })
+}
+
+/// Kelvin offset upstream uses when converting EC thermal thresholds to Celsius.
+const KELVIN_OFFSET: i32 = 273;
+
+fn threshold_celsius(kelvin: u32) -> i32 {
+    kelvin as i32 - KELVIN_OFFSET
+}
+
+/// Reads the EC thermal configuration for one sensor.
+///
+/// Upstream stores thresholds in Kelvin with zero meaning "disabled"; the ABI
+/// reports Celsius plus an `enabled_mask` so a disabled threshold is never
+/// confused with a real sub-zero value.
+pub(crate) fn get_thermal_thresholds(
+    ec: &CrosEc,
+    sensor_index: u32,
+) -> Result<FrameworkThermalThresholds, framework_lib::chromium_ec::EcError> {
+    let cfg = ec.get_thermal_threshold(sensor_index)?;
+    // Copy out of the packed struct before taking references to the arrays.
+    let temp_host = { cfg.temp_host };
+    let temp_host_release = { cfg.temp_host_release };
+    let temp_fan_off = { cfg.temp_fan_off };
+    let temp_fan_max = { cfg.temp_fan_max };
+
+    let mut enabled_mask = 0u32;
+    let mut mark = |flag: FrameworkThermalThresholdFlag, kelvin: u32| {
+        if kelvin != 0 {
+            enabled_mask |= flag as u32;
+        }
+    };
+    mark(FrameworkThermalThresholdFlag::Warn, temp_host[0]);
+    mark(FrameworkThermalThresholdFlag::High, temp_host[1]);
+    mark(FrameworkThermalThresholdFlag::Halt, temp_host[2]);
+    mark(
+        FrameworkThermalThresholdFlag::WarnRelease,
+        temp_host_release[0],
+    );
+    mark(
+        FrameworkThermalThresholdFlag::HighRelease,
+        temp_host_release[1],
+    );
+    mark(
+        FrameworkThermalThresholdFlag::HaltRelease,
+        temp_host_release[2],
+    );
+    mark(FrameworkThermalThresholdFlag::FanOff, temp_fan_off);
+    mark(FrameworkThermalThresholdFlag::FanMax, temp_fan_max);
+
+    Ok(FrameworkThermalThresholds {
+        enabled_mask,
+        warn_celsius: threshold_celsius(temp_host[0]),
+        high_celsius: threshold_celsius(temp_host[1]),
+        halt_celsius: threshold_celsius(temp_host[2]),
+        warn_release_celsius: threshold_celsius(temp_host_release[0]),
+        high_release_celsius: threshold_celsius(temp_host_release[1]),
+        halt_release_celsius: threshold_celsius(temp_host_release[2]),
+        fan_off_celsius: threshold_celsius(temp_fan_off),
+        fan_max_celsius: threshold_celsius(temp_fan_max),
+    })
+}
+
+/// Writes thermal thresholds for one sensor via upstream's read-modify-write
+/// helper. Each value follows upstream's convention: negative keeps the current
+/// threshold, zero disables it, positive is degrees Celsius.
+pub(crate) fn set_thermal_thresholds(
+    ec: &CrosEc,
+    sensor_index: u32,
+    values: &[i32; 5],
+) -> Result<(), framework_lib::chromium_ec::EcError> {
+    power::set_thermal_thresholds(ec, sensor_index, values)
+}
+
+pub(crate) struct ApThrottle {
+    pub soft: bool,
+    pub hard: bool,
+}
+
+pub(crate) fn get_ap_throttle(
+    ec: &CrosEc,
+) -> Result<ApThrottle, framework_lib::chromium_ec::EcError> {
+    let res = ec.get_ap_throttle_status()?;
+    Ok(ApThrottle {
+        soft: { res.soft_ap_throttle } == 1,
+        hard: { res.hard_ap_throttle } == 1,
+    })
+}
+
+/// Battery cutoff (ship mode) state. `None` when the EC does not answer.
+pub(crate) fn get_cutoff_status(ec: &CrosEc) -> Option<bool> {
+    power::get_cutoff_status(ec)
+}
+
+/// Fan count as reported by the EC.
+///
+/// More authoritative than the memmap-derived count in `thermal_snapshot`, which
+/// infers presence from the `0xFFFF` "not present" sentinel.
+pub(crate) fn get_fan_count(ec: &CrosEc) -> Result<usize, framework_lib::chromium_ec::EcError> {
+    power::get_fan_num(ec)
+}
+
+/// Whether the system runs without a battery (Framework Desktop standalone mode).
+///
+/// `is_standalone` reflects the EC's own view; `standalone_mode` additionally
+/// accounts for the platform default.
+pub(crate) fn standalone_state(ec: &CrosEc) -> (bool, bool) {
+    (power::is_standalone(ec), power::standalone_mode(ec))
+}
+
+/// Reads a temperature sensor's name straight from EC firmware.
+pub(crate) struct TempSensorInfo {
+    pub name: String,
+    /// EC `EC_TEMP_SENSOR_TYPE_*` tag: 0 ignored, 1 CPU, 2 board, 3 case, 4 battery.
+    pub sensor_type: u8,
+}
+
+/// Reads a temperature sensor's name and type in one host command.
+///
+/// Upstream's `CrosEc::get_temp_sensor_name` discards the `sensor_type` byte, so
+/// send `EcRequestTempSensorGetInfo` directly to keep both halves of the response.
+/// Name decoding matches upstream: UTF-8, trailing NULs trimmed.
+pub(crate) fn get_temp_sensor_info(
+    ec: &CrosEc,
+    index: u8,
+) -> Result<TempSensorInfo, framework_lib::chromium_ec::EcError> {
+    let res = EcRequestTempSensorGetInfo { id: index }.send_command(ec)?;
+    // Copy out of the packed struct before borrowing the array.
+    let sensor_name = { res.sensor_name };
+    let name = std::str::from_utf8(&sensor_name)
+        .map_err(|utf8_err| {
+            framework_lib::chromium_ec::EcError::DeviceError(format!(
+                "Failed to decode sensor name: {:?}",
+                utf8_err
+            ))
+        })?
+        .trim_end_matches(char::from(0))
+        .to_string();
+
+    Ok(TempSensorInfo {
+        name,
+        sensor_type: { res.sensor_type },
+    })
+}
+
+/// Maps an EC-reported sensor name onto the stable `FrameworkSensorName` enum.
+///
+/// Firmware spelling varies by platform (`F75303_CPU`, `f75303 cpu`, `dGPU VR`),
+/// so compare on a lowercased, separator-stripped form. Unrecognised names stay
+/// `Generic` — the raw string is still returned alongside for display.
+pub(crate) fn map_sensor_name(name: &str) -> FrameworkSensorName {
+    use FrameworkSensorName as N;
+
+    let normalized: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+
+    match normalized.as_str() {
+        "f75303local" => N::F75303Local,
+        "f75303cpu" => N::F75303Cpu,
+        "f75303ddr" => N::F75303Ddr,
+        "f75303skin" => N::F75303Skin,
+        "f75303apu" => N::F75303Apu,
+        "f75303amb" => N::F75303Amb,
+        "f57397vccgt" => N::F57397VccGt,
+        "battery" => N::Battery,
+        "peci" => N::Peci,
+        "chargeric" => N::ChargerIc,
+        "apu" => N::Apu,
+        "dgpuvr" => N::DgpuVr,
+        "dgpuvram" => N::DgpuVram,
+        "dgpuamb" => N::DgpuAmb,
+        "dgputemp" | "dgpu" => N::DgpuTemp,
+        "virtual" => N::Virtual,
+        _ => N::Generic,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn firmware_sensor_names_map_onto_the_stable_enum() {
+        assert_eq!(
+            map_sensor_name("F75303_Local"),
+            FrameworkSensorName::F75303Local
+        );
+        assert_eq!(
+            map_sensor_name("F75303_CPU"),
+            FrameworkSensorName::F75303Cpu
+        );
+        assert_eq!(map_sensor_name("APU"), FrameworkSensorName::Apu);
+        assert_eq!(map_sensor_name("dGPU VR"), FrameworkSensorName::DgpuVr);
+        assert_eq!(map_sensor_name("Virtual"), FrameworkSensorName::Virtual);
+    }
+
+    #[test]
+    fn unknown_firmware_names_fall_back_to_generic() {
+        assert_eq!(
+            map_sensor_name("Some_New_Sensor"),
+            FrameworkSensorName::Generic
+        );
+        assert_eq!(map_sensor_name(""), FrameworkSensorName::Generic);
+    }
+
+    #[test]
+    fn disabled_thresholds_read_back_as_the_kelvin_zero_offset() {
+        // Upstream stores 0 K for "disabled"; the mask is what callers must check.
+        assert_eq!(threshold_celsius(0), -273);
+        assert_eq!(threshold_celsius(273 + 80), 80);
+    }
 }
