@@ -27,6 +27,8 @@ The crate is split into two layers:
 | `src/lib.rs` | Main FFI surface. Defines the public native ABI types and exports the C-callable entry points consumed by C# and other native callers. |
 | `src/abi_impls.rs` | Conversion glue between upstream `framework_lib` Rust enums/types and the FFI enums exposed by this crate, such as EC driver, platform, platform family, and current EC image. |
 | `src/byte_buffer.rs` | Owns `FrameworkByteBuffer` memory helpers: creating buffers from `Vec<u8>` and safely freeing them later across the FFI boundary. |
+| `src/diagnostics.rs` | EC diagnostic and system-state readback: `hello` liveness echo, host command protocol info, sysinfo (image/reset flags), saved panic data, port 80 POST code history, and the memmap switch byte (lid, power button, write protect, recovery). Upstream exposes several of these only through printing helpers, so the readback logic lives here. |
+| `src/smart_battery.rs` | Smart Battery (SBS) readback over I2C passthrough. Wraps upstream `framework_lib::smart_battery::SmartBattery::collect_data`, decodes the packed manufacture date, and maps the result onto the FFI struct. Slow (many round trips) — on-demand only, never in a poll loop. |
 | `src/gpu_descriptor.rs` | Read-only helper logic for the Framework 16 expansion-bay GPU descriptor surface. Maps upstream descriptor headers into FFI structs, reads raw descriptor bytes, validates them against caller-provided bytes, and returns stable default payloads on failure. |
 | `src/results.rs` | Small constructors for the various `*_Result` structs and a few default result payloads. Keeps repetitive result assembly out of `lib.rs`. |
 | `src/runtime.rs` | Runtime/handle helpers: open the EC with the default or requested driver, validate incoming handle pointers, read feature flags, and parse optional fan indexes. |
@@ -57,6 +59,9 @@ If you want to change something, this is usually the right file:
 - **Adjust FFI byte buffer ownership** → `src/byte_buffer.rs`
 - **Adjust GPU descriptor header/raw/validation logic** → `src/gpu_descriptor.rs`
 - **Adjust thermal/fan/power snapshots** → `src/thermal.rs`
+- **Adjust thermal thresholds, AP throttle, or EC sensor names** → `src/thermal.rs`
+- **Adjust EC diagnostics (hello, protocol, sysinfo, panic, port 80, switches)** → `src/diagnostics.rs`
+- **Adjust Smart Battery / SBS readback** → `src/smart_battery.rs`
 - **Adjust module inventory composition** → `src/inventory/builder.rs`
 - **Add a new inventory detector** → `src/inventory/detect.rs` or `src/inventory/internals.rs`
 - **Adjust USB-C slot assignment logic** → `src/inventory/usb_slots.rs`

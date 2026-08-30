@@ -5,11 +5,13 @@ use framework_lib::smbios;
 mod abi_impls;
 mod byte_buffer;
 mod controls;
+mod diagnostics;
 mod gpu_descriptor;
 mod inventory;
 mod pd;
 mod results;
 mod runtime;
+mod smart_battery;
 mod status;
 mod thermal;
 
@@ -2128,4 +2130,865 @@ pub unsafe extern "C" fn framework_ec_restore_auto_fan_control(
     };
 
     restore_auto_fan_control_result(status, requested_fan_index)
+}
+
+// ---------------------------------------------------------------------------
+// EC switches
+// ---------------------------------------------------------------------------
+
+/// Live EC switch positions read from the memmap switch byte.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcSwitchesResult {
+    pub status: FrameworkStatus,
+    /// The raw switch byte, for callers that want bits the ABI does not name.
+    pub raw: u8,
+    pub lid_open: u8,
+    pub power_button_pressed: u8,
+    /// Note the inverted sense: 1 means write protect is *disabled*.
+    pub write_protect_disabled: u8,
+    pub dedicated_recovery: u8,
+    pub reserved: [u8; 3],
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_switches(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcSwitchesResult {
+    let fail = |status| FrameworkEcSwitchesResult {
+        status,
+        raw: 0,
+        lid_open: 0,
+        power_button_pressed: 0,
+        write_protect_disabled: 0,
+        dedicated_recovery: 0,
+        reserved: [0; 3],
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    let Some(switches) = diagnostics::get_switches(&handle.ec) else {
+        return fail(FrameworkStatus::with(
+            FrameworkStatusCode::DataUnavailable,
+            0,
+        ));
+    };
+
+    FrameworkEcSwitchesResult {
+        status: FrameworkStatus::success(),
+        raw: switches.raw,
+        lid_open: u8::from(switches.lid_open),
+        power_button_pressed: u8::from(switches.power_button_pressed),
+        write_protect_disabled: u8::from(switches.write_protect_disabled),
+        dedicated_recovery: u8::from(switches.dedicated_recovery),
+        reserved: [0; 3],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EC liveness and protocol
+// ---------------------------------------------------------------------------
+
+/// Result of the EC `hello` diagnostic command.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcHelloResult {
+    pub status: FrameworkStatus,
+    /// What the EC echoed back: `in_data + 0x01020304` on a healthy EC.
+    pub out_data: u32,
+    /// 1 when `out_data` matched the expected echo, 0 otherwise.
+    pub is_expected: u8,
+    pub reserved: [u8; 3],
+}
+
+#[no_mangle]
+/// Sends the EC `hello` command and checks the echo.
+///
+/// Pass any `in_data`; the EC must return `in_data + 0x01020304`. This is the
+/// cheapest end-to-end check that EC host communication actually works.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_hello(
+    handle: *const FrameworkEcHandle,
+    in_data: u32,
+) -> FrameworkEcHelloResult {
+    let fail = |status| FrameworkEcHelloResult {
+        status,
+        out_data: 0,
+        is_expected: 0,
+        reserved: [0; 3],
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match handle.ec.hello(in_data) {
+        Ok(out_data) => FrameworkEcHelloResult {
+            status: FrameworkStatus::success(),
+            out_data,
+            is_expected: u8::from(out_data == in_data.wrapping_add(diagnostics::HELLO_OFFSET)),
+            reserved: [0; 3],
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+#[no_mangle]
+/// Convenience wrapper over `framework_ec_hello` using the same magic value
+/// upstream's `check_hello` uses.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_check_hello(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcHelloResult {
+    framework_ec_hello(handle, diagnostics::HELLO_DEFAULT_IN_DATA)
+}
+
+/// Set when `EC_RES_IN_PROGRESS` may be returned by a slow command.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkEcProtocolFlag {
+    InProgressSupported = 0x01,
+}
+
+/// EC host command protocol capabilities.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcProtocolInfoResult {
+    pub status: FrameworkStatus,
+    /// Bitmask of supported protocol versions; bit N means version N.
+    pub protocol_versions: u32,
+    pub max_request_packet_size: u16,
+    pub max_response_packet_size: u16,
+    /// See `FrameworkEcProtocolFlag`.
+    pub flags: u32,
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_protocol_info(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcProtocolInfoResult {
+    let fail = |status| FrameworkEcProtocolInfoResult {
+        status,
+        protocol_versions: 0,
+        max_request_packet_size: 0,
+        max_response_packet_size: 0,
+        flags: 0,
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match diagnostics::get_protocol_info(&handle.ec) {
+        Ok(info) => FrameworkEcProtocolInfoResult {
+            status: FrameworkStatus::success(),
+            protocol_versions: info.protocol_versions,
+            max_request_packet_size: info.max_request_packet_size,
+            max_response_packet_size: info.max_response_packet_size,
+            flags: info.flags,
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sysinfo
+// ---------------------------------------------------------------------------
+
+/// Bit values of `FrameworkEcSysinfoResult::flags`.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkEcSysinfoFlag {
+    /// Write protect is asserted, debug features are disabled.
+    Locked = 0x01,
+    /// Locked even if write protect is deasserted.
+    ForceLocked = 0x02,
+    /// Jumping between images is enabled.
+    JumpEnabled = 0x04,
+    /// EC jumped directly to the current image at boot.
+    JumpedToCurrentImage = 0x08,
+    /// EC will reboot when the system shuts down.
+    RebootAtShutdown = 0x10,
+    /// System is in manual recovery mode.
+    InManualRecovery = 0x20,
+}
+
+/// Bit values of the EC reset-flag words reported by sysinfo and uptime.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkEcResetFlag {
+    Other = 0x0000_0001,
+    ResetPin = 0x0000_0002,
+    Brownout = 0x0000_0004,
+    PowerOn = 0x0000_0008,
+    Watchdog = 0x0000_0010,
+    Soft = 0x0000_0020,
+    Hibernate = 0x0000_0040,
+    RtcAlarm = 0x0000_0080,
+    WakePin = 0x0000_0100,
+    LowBattery = 0x0000_0200,
+    Sysjump = 0x0000_0400,
+    Hard = 0x0000_0800,
+    ApOff = 0x0000_1000,
+    Preserved = 0x0000_2000,
+    UsbResume = 0x0000_4000,
+    Rdd = 0x0000_8000,
+    Rbox = 0x0001_0000,
+    Security = 0x0002_0000,
+    ApWatchdog = 0x0004_0000,
+    StayInRo = 0x0008_0000,
+    Efs = 0x0010_0000,
+    ApIdle = 0x0020_0000,
+    InitialPwr = 0x0040_0000,
+}
+
+/// EC system information: which image is running and why it booted.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcSysinfoResult {
+    pub status: FrameworkStatus,
+    pub current_image: FrameworkEcCurrentImage,
+    /// See `FrameworkEcResetFlag`.
+    pub reset_flags: u32,
+    /// See `FrameworkEcSysinfoFlag`.
+    pub flags: u32,
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_sysinfo(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcSysinfoResult {
+    let fail = |status| FrameworkEcSysinfoResult {
+        status,
+        current_image: FrameworkEcCurrentImage::Unknown,
+        reset_flags: 0,
+        flags: 0,
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match diagnostics::get_sysinfo(&handle.ec) {
+        Ok(info) => FrameworkEcSysinfoResult {
+            status: FrameworkStatus::success(),
+            current_image: match info.current_image {
+                1 => FrameworkEcCurrentImage::Ro,
+                2 => FrameworkEcCurrentImage::Rw,
+                _ => FrameworkEcCurrentImage::Unknown,
+            },
+            reset_flags: info.reset_flags,
+            flags: info.flags,
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Panic info
+// ---------------------------------------------------------------------------
+
+/// Saved EC panic data.
+///
+/// The `data` buffer holds the raw `struct panic_data` blob and must be
+/// released with `framework_byte_buffer_free`. A zero-length buffer with a
+/// success status means the EC simply has no stored panic.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcPanicInfoResult {
+    pub status: FrameworkStatus,
+    pub data: FrameworkByteBuffer,
+    /// Architecture tag from the blob header.
+    pub arch: u8,
+    pub struct_version: u8,
+    /// Panic data flags from the blob header.
+    pub flags: u8,
+    /// 1 when the trailer magic and struct size both agree with the payload.
+    pub is_valid: u8,
+    /// Struct size the EC reported in the blob trailer.
+    pub struct_size: u32,
+    /// Trailer magic; `0x21636E50` ("Pnc!") when valid.
+    pub magic: u32,
+}
+
+#[no_mangle]
+/// Reads stored EC panic data without clearing the EC's "already read" flag
+/// where the EC supports the v1 command.
+///
+/// The returned `data` buffer must be released with `framework_byte_buffer_free`.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_panic_info(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcPanicInfoResult {
+    let fail = |status| FrameworkEcPanicInfoResult {
+        status,
+        data: FrameworkByteBuffer::default(),
+        arch: 0,
+        struct_version: 0,
+        flags: 0,
+        is_valid: 0,
+        struct_size: 0,
+        magic: 0,
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match diagnostics::get_panic_info(&handle.ec) {
+        Ok(info) => FrameworkEcPanicInfoResult {
+            status: FrameworkStatus::success(),
+            data: FrameworkByteBuffer::from_vec(info.data),
+            arch: info.arch,
+            struct_version: info.struct_version,
+            flags: info.flags,
+            is_valid: u8::from(info.is_valid),
+            struct_size: info.struct_size,
+            magic: info.magic,
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Port 80 history
+// ---------------------------------------------------------------------------
+
+/// Marker codes the EC inserts into the port 80 history.
+#[repr(u16)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkPort80Event {
+    /// The system resumed (S3 -> S0).
+    Resume = 0x1001,
+    /// The system reset.
+    Reset = 0x1002,
+}
+
+/// Port 80 POST code history read from the EC.
+///
+/// `codes` holds `history_size` little-endian `u16` entries in buffer order, so
+/// its length is `history_size * 2` bytes. The newest entry sits at
+/// `writes % history_size`. Release it with `framework_byte_buffer_free`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcPort80HistoryResult {
+    pub status: FrameworkStatus,
+    /// Total number of port 80 writes so far.
+    pub writes: u32,
+    /// Size of the history buffer in entries.
+    pub history_size: u32,
+    pub codes: FrameworkByteBuffer,
+}
+
+#[no_mangle]
+/// The returned `codes` buffer must be released with `framework_byte_buffer_free`.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_port80_history(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcPort80HistoryResult {
+    let fail = |status| FrameworkEcPort80HistoryResult {
+        status,
+        writes: 0,
+        history_size: 0,
+        codes: FrameworkByteBuffer::default(),
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match diagnostics::port80_read(&handle.ec) {
+        Ok(history) => FrameworkEcPort80HistoryResult {
+            status: FrameworkStatus::success(),
+            writes: history.writes,
+            history_size: history.history_size,
+            codes: FrameworkByteBuffer::from_vec(history.codes),
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Battery cutoff and AP throttle
+// ---------------------------------------------------------------------------
+
+/// Battery cutoff (ship mode) state.
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkBatteryCutoffState {
+    /// The EC did not answer the cutoff query.
+    Unknown = 0,
+    NotCutOff = 1,
+    CutOff = 2,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcBatteryCutoffResult {
+    pub status: FrameworkStatus,
+    pub state: FrameworkBatteryCutoffState,
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_battery_cutoff_status(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcBatteryCutoffResult {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => {
+            return FrameworkEcBatteryCutoffResult {
+                status,
+                state: FrameworkBatteryCutoffState::Unknown,
+            }
+        }
+    };
+    match thermal::get_cutoff_status(&handle.ec) {
+        Some(cut_off) => FrameworkEcBatteryCutoffResult {
+            status: FrameworkStatus::success(),
+            state: if cut_off {
+                FrameworkBatteryCutoffState::CutOff
+            } else {
+                FrameworkBatteryCutoffState::NotCutOff
+            },
+        },
+        None => FrameworkEcBatteryCutoffResult {
+            status: FrameworkStatus::with(FrameworkStatusCode::DataUnavailable, 0),
+            state: FrameworkBatteryCutoffState::Unknown,
+        },
+    }
+}
+
+/// Whether the EC is currently throttling the AP for thermal reasons.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcApThrottleResult {
+    pub status: FrameworkStatus,
+    pub soft_throttled: u8,
+    pub hard_throttled: u8,
+    pub reserved: [u8; 2],
+}
+
+#[no_mangle]
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_ap_throttle_status(
+    handle: *const FrameworkEcHandle,
+) -> FrameworkEcApThrottleResult {
+    let fail = |status| FrameworkEcApThrottleResult {
+        status,
+        soft_throttled: 0,
+        hard_throttled: 0,
+        reserved: [0; 2],
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match thermal::get_ap_throttle(&handle.ec) {
+        Ok(throttle) => FrameworkEcApThrottleResult {
+            status: FrameworkStatus::success(),
+            soft_throttled: u8::from(throttle.soft),
+            hard_throttled: u8::from(throttle.hard),
+            reserved: [0; 2],
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Thermal thresholds
+// ---------------------------------------------------------------------------
+
+/// Bit values of `FrameworkThermalThresholds::enabled_mask`.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameworkThermalThresholdFlag {
+    Warn = 0x01,
+    High = 0x02,
+    Halt = 0x04,
+    WarnRelease = 0x08,
+    HighRelease = 0x10,
+    HaltRelease = 0x20,
+    FanOff = 0x40,
+    FanMax = 0x80,
+}
+
+/// EC thermal configuration for one temperature sensor.
+///
+/// The EC stores thresholds in Kelvin with zero meaning "disabled". This ABI
+/// reports degrees Celsius, so a disabled threshold reads back as -273; always
+/// consult `enabled_mask` rather than testing the Celsius value.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameworkThermalThresholds {
+    /// See `FrameworkThermalThresholdFlag`. A clear bit means that threshold is
+    /// disabled in EC firmware.
+    pub enabled_mask: u32,
+    /// AP is warned above this temperature.
+    pub warn_celsius: i32,
+    /// EC throttles the AP above this temperature.
+    pub high_celsius: i32,
+    /// EC shuts the system down above this temperature.
+    pub halt_celsius: i32,
+    /// Release point for `warn_celsius`; 0 K in firmware means default 1 degree hysteresis.
+    pub warn_release_celsius: i32,
+    /// Release point for `high_celsius`.
+    pub high_release_celsius: i32,
+    /// Release point for `halt_celsius`.
+    pub halt_release_celsius: i32,
+    /// No active cooling is needed below this temperature.
+    pub fan_off_celsius: i32,
+    /// Maximum active cooling is applied above this temperature.
+    pub fan_max_celsius: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcThermalThresholdsResult {
+    pub status: FrameworkStatus,
+    pub sensor_index: u32,
+    pub thresholds: FrameworkThermalThresholds,
+}
+
+#[no_mangle]
+/// Reads the EC thermal configuration for one temperature sensor.
+///
+/// `sensor_index` matches the temperature slot index used by
+/// `framework_ec_get_thermal_snapshot`.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_thermal_thresholds(
+    handle: *const FrameworkEcHandle,
+    sensor_index: u32,
+) -> FrameworkEcThermalThresholdsResult {
+    let fail = |status| FrameworkEcThermalThresholdsResult {
+        status,
+        sensor_index,
+        thresholds: FrameworkThermalThresholds {
+            enabled_mask: 0,
+            warn_celsius: 0,
+            high_celsius: 0,
+            halt_celsius: 0,
+            warn_release_celsius: 0,
+            high_release_celsius: 0,
+            halt_release_celsius: 0,
+            fan_off_celsius: 0,
+            fan_max_celsius: 0,
+        },
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match thermal::get_thermal_thresholds(&handle.ec, sensor_index) {
+        Ok(thresholds) => FrameworkEcThermalThresholdsResult {
+            status: FrameworkStatus::success(),
+            sensor_index,
+            thresholds,
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+#[no_mangle]
+/// Writes EC thermal thresholds for one temperature sensor.
+///
+/// Each value follows upstream's convention: a negative value keeps the current
+/// threshold, zero disables it, and a positive value is degrees Celsius. The
+/// call is a read-modify-write, so untouched thresholds and the release points
+/// are preserved.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_set_thermal_thresholds(
+    handle: *const FrameworkEcHandle,
+    sensor_index: u32,
+    warn_celsius: i32,
+    high_celsius: i32,
+    halt_celsius: i32,
+    fan_off_celsius: i32,
+    fan_max_celsius: i32,
+) -> FrameworkStatus {
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return status,
+    };
+    let values = [
+        warn_celsius,
+        high_celsius,
+        halt_celsius,
+        fan_off_celsius,
+        fan_max_celsius,
+    ];
+    match thermal::set_thermal_thresholds(&handle.ec, sensor_index, &values) {
+        Ok(()) => FrameworkStatus::success(),
+        Err(error) => status_from_error(error),
+    }
+}
+
+/// A temperature sensor's name as reported by EC firmware.
+///
+/// The `name` buffer must be released with `framework_byte_buffer_free`.
+/// `mapped_name` is the same name resolved onto the stable
+/// `FrameworkSensorName` enum, or `Generic` when firmware uses a name this
+/// version does not recognise.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcTempSensorNameResult {
+    pub status: FrameworkStatus,
+    pub sensor_index: u32,
+    pub mapped_name: FrameworkSensorName,
+    /// EC sensor type tag: 0 ignored, 1 CPU, 2 board, 3 case, 4 battery.
+    pub sensor_type: u8,
+    pub reserved: [u8; 1],
+    pub name: FrameworkByteBuffer,
+}
+
+#[no_mangle]
+/// Reads a temperature sensor's name from EC firmware.
+///
+/// This costs one host command per call, so it is deliberately kept out of the
+/// polled thermal snapshot: read the names once and cache them, then poll
+/// `framework_ec_get_thermal_snapshot` for values.
+///
+/// The returned `name` buffer must be released with `framework_byte_buffer_free`.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_temp_sensor_name(
+    handle: *const FrameworkEcHandle,
+    sensor_index: u8,
+) -> FrameworkEcTempSensorNameResult {
+    let fail = |status| FrameworkEcTempSensorNameResult {
+        status,
+        sensor_index: u32::from(sensor_index),
+        mapped_name: FrameworkSensorName::Unknown,
+        sensor_type: 0,
+        reserved: [0; 1],
+        name: FrameworkByteBuffer::default(),
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    match thermal::get_temp_sensor_info(&handle.ec, sensor_index) {
+        Ok(info) => FrameworkEcTempSensorNameResult {
+            status: FrameworkStatus::success(),
+            sensor_index: u32::from(sensor_index),
+            mapped_name: thermal::map_sensor_name(&info.name),
+            sensor_type: info.sensor_type,
+            reserved: [0; 1],
+            name: FrameworkByteBuffer::from_vec(info.name.into_bytes()),
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+/// Result of the Smart Battery SHA-1 HMAC authentication challenge.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcBatteryAuthResult {
+    pub status: FrameworkStatus,
+    /// 1 when the battery's response matched the expected challenge. A zero with a
+    /// success status means the battery answered but failed authentication.
+    pub authenticated: u8,
+    pub reserved: [u8; 3],
+}
+
+#[no_mangle]
+/// Runs the Smart Battery SHA-1 HMAC challenge/response authentication.
+///
+/// `auth_key` must point to exactly 16 bytes. Passing null, or a battery that does
+/// not answer, yields a non-success status; a battery that answers but fails the
+/// challenge yields success with `authenticated = 0`.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library, and `auth_key` must
+/// point to at least 16 readable bytes.
+pub unsafe extern "C" fn framework_ec_authenticate_battery(
+    handle: *const FrameworkEcHandle,
+    auth_key: *const u8,
+) -> FrameworkEcBatteryAuthResult {
+    let fail = |status| FrameworkEcBatteryAuthResult {
+        status,
+        authenticated: 0,
+        reserved: [0; 3],
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    if auth_key.is_null() {
+        return fail(FrameworkStatus::with(FrameworkStatusCode::NullPointer, 0));
+    }
+
+    let mut key = [0u8; 16];
+    key.copy_from_slice(std::slice::from_raw_parts(auth_key, 16));
+
+    match smart_battery::authenticate(&handle.ec, &key) {
+        Ok(authenticated) => FrameworkEcBatteryAuthResult {
+            status: FrameworkStatus::success(),
+            authenticated: u8::from(authenticated),
+            reserved: [0; 3],
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Smart Battery (SBS)
+// ---------------------------------------------------------------------------
+
+/// Full Smart Battery data set read over I2C passthrough.
+///
+/// All five text/blob buffers are owned by the caller. Release the whole record
+/// with `framework_smart_battery_data_free`; do not free the individual buffers.
+///
+/// Fields in the unsealed group (`state_of_health`, `operation_status`,
+/// `safety_alert`, `safety_status`, `pf_alert`, `pf_status`, `lifetime_1`
+/// through `lifetime_5`) are only populated when an unseal key was supplied and
+/// accepted; check `unsealed`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkSmartBatteryData {
+    /// SBS BatteryMode register.
+    pub mode: u16,
+    pub serial_number: u16,
+    /// Raw packed SBS ManufactureDate word.
+    pub manufacture_date_raw: u16,
+    pub manufacture_year: u16,
+    pub manufacture_month: u8,
+    pub manufacture_day: u8,
+    /// Tenths of a Kelvin: degrees Celsius = value / 10 - 273.15.
+    pub temperature_decikelvin: u16,
+    pub voltage_mv: u16,
+    pub cell_voltage_1_mv: u16,
+    pub cell_voltage_2_mv: u16,
+    pub cell_voltage_3_mv: u16,
+    pub cell_voltage_4_mv: u16,
+    pub cycle_count: u16,
+    /// Signed: negative while discharging.
+    pub current_ma: i16,
+    pub avg_current_ma: i16,
+    pub rel_state_of_charge: u16,
+    pub abs_state_of_charge: u16,
+    pub remaining_capacity: u16,
+    pub full_charge_capacity: u16,
+    pub charging_current_ma: i16,
+    pub charging_voltage_mv: u16,
+    /// SBS BatteryStatus register.
+    pub battery_status: u16,
+    pub design_capacity: u16,
+    pub design_voltage_mv: u16,
+    pub operation_status: u32,
+    pub safety_alert: u32,
+    pub safety_status: u32,
+    pub pf_alert: u32,
+    pub pf_status: u32,
+    /// 1 when the unsealed register group was read successfully.
+    pub unsealed: u8,
+    pub reserved: [u8; 3],
+    pub device_name: FrameworkByteBuffer,
+    pub manufacturer_name: FrameworkByteBuffer,
+    pub device_chemistry: FrameworkByteBuffer,
+    /// Raw state-of-health block; first two LE u16s are mAh and cWh.
+    pub state_of_health: FrameworkByteBuffer,
+    /// Raw MAC 0x0002 response: subcmd echo, device number, firmware version, build.
+    pub firmware_version: FrameworkByteBuffer,
+    pub lifetime_1: FrameworkByteBuffer,
+    pub lifetime_2: FrameworkByteBuffer,
+    pub lifetime_3: FrameworkByteBuffer,
+    pub lifetime_4: FrameworkByteBuffer,
+    pub lifetime_5: FrameworkByteBuffer,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FrameworkEcSmartBatteryResult {
+    pub status: FrameworkStatus,
+    pub data: FrameworkSmartBatteryData,
+}
+
+#[no_mangle]
+/// Reads the full Smart Battery data set.
+///
+/// This performs many I2C passthrough round trips and is far slower than
+/// `framework_ec_get_power_snapshot`; call it on demand, not in a poll loop.
+///
+/// Set `use_unseal_key` to a non-zero value to unlock the manufacturer-access
+/// registers using `unseal_key`; pass zero to read only the sealed-mode subset.
+///
+/// The returned record must be released with `framework_smart_battery_data_free`.
+///
+/// # Safety
+/// `handle` must be a valid pointer returned by this library.
+pub unsafe extern "C" fn framework_ec_get_smart_battery_data(
+    handle: *const FrameworkEcHandle,
+    use_unseal_key: u8,
+    unseal_key: u32,
+) -> FrameworkEcSmartBatteryResult {
+    let fail = |status| FrameworkEcSmartBatteryResult {
+        status,
+        data: smart_battery::default_ffi(),
+    };
+    let handle = match require_handle(handle) {
+        Ok(handle) => handle,
+        Err(status) => return fail(status),
+    };
+    let key = if use_unseal_key != 0 {
+        Some(unseal_key)
+    } else {
+        None
+    };
+    match smart_battery::collect(&handle.ec, key) {
+        Ok(data) => FrameworkEcSmartBatteryResult {
+            status: FrameworkStatus::success(),
+            data: smart_battery::into_ffi(data),
+        },
+        Err(error) => fail(status_from_error(error)),
+    }
+}
+
+#[no_mangle]
+/// Releases every buffer owned by a `FrameworkSmartBatteryData`.
+///
+/// # Safety
+/// `data` must point to a record returned by
+/// `framework_ec_get_smart_battery_data` that has not already been freed.
+/// Passing null is a no-op.
+pub unsafe extern "C" fn framework_smart_battery_data_free(data: *mut FrameworkSmartBatteryData) {
+    if data.is_null() {
+        return;
+    }
+
+    let data = &mut *data;
+    for buffer in [
+        &mut data.device_name,
+        &mut data.manufacturer_name,
+        &mut data.device_chemistry,
+        &mut data.state_of_health,
+        &mut data.firmware_version,
+        &mut data.lifetime_1,
+        &mut data.lifetime_2,
+        &mut data.lifetime_3,
+        &mut data.lifetime_4,
+        &mut data.lifetime_5,
+    ] {
+        let owned = *buffer;
+        *buffer = FrameworkByteBuffer::default();
+        owned.destroy();
+    }
 }

@@ -104,11 +104,27 @@ control layer:
   Framework 16 input modules, touchpad, fingerprint reader, touchscreen, webcam,
   and expansion bay presence
 - structured status and device error reporting
+- EC thermal thresholds read and write per sensor (warn / high / halt, their release
+  points, and the `fan_off` / `fan_max` temperatures)
+- EC-reported temperature sensor names and sensor type tags, with the name resolved onto
+  the stable `FrameworkSensorName` enum
+- AP throttle status (soft and hard)
+- battery cutoff (ship mode) status
+- EC switch positions (lid open, power button, write protect, dedicated recovery)
+- EC `hello` liveness echo and a `check_hello` convenience wrapper
+- EC host command protocol info (supported versions, max packet sizes)
+- EC sysinfo (current image, reset flags, sysinfo flags)
+- saved EC panic data as a raw blob with decoded header/trailer fields
+- port 80 POST code history
+- full Smart Battery (SBS) data set, including chemistry, manufacture date, cycle count,
+  per-cell voltages, safety/PF status words and the lifetime blocks when unsealed
+- Smart Battery SHA-1 HMAC authentication challenge
 
-The current FFI still does **not** expose an implemented EC fan-table or max-fan-RPM
-reader. The repo currently reads live fan RPM and can set a target RPM/duty, but the
-"limited by EC fan table max RPM" behavior remains firmware-enforced rather than a
-separate readable FFI value.
+The current FFI still does **not** expose a max-fan-RPM reader. The `fan_off` / `fan_max`
+values now readable through `framework_ec_get_thermal_thresholds` are the *temperature*
+setpoints at which the EC starts and maxes active cooling — they are not RPM limits. The
+repo reads live fan RPM and can set a target RPM/duty, but the "limited by EC fan table max
+RPM" behavior remains firmware-enforced rather than a separate readable FFI value.
 
 ## Missing Features
 
@@ -121,11 +137,10 @@ Compared with the full `framework-system` repo and CLI, the major missing areas 
 
 ### Sensors and Switch State
 
-- ambient light sensor values
-- accelerometer data and lid angle
 - stylus battery reporting
-- EC uptime and S0ix counters
-- board ID reporting
+
+Ambient light readings, accelerometer/lid angle, EC uptime, S0ix counters, board ID,
+EC switch positions and AP throttle status are all exposed now.
 
 ### USB-C and PD Management
 
@@ -138,11 +153,10 @@ Compared with the full `framework-system` repo and CLI, the major missing areas 
 ### Device and Platform Controls
 
 - broader keyboard backlight control surface
-- fingerprint LED write/control surface
-- tablet mode override
 - touchscreen enable/disable
-- input deck mode control
 - NVIDIA-related status on supported systems
+
+Fingerprint LED write, tablet mode override and input deck mode control are exposed now.
 
 ### Firmware and Binary Tooling
 
@@ -153,6 +167,9 @@ Compared with the full `framework-system` repo and CLI, the major missing areas 
 - capsule parsing
 - EC reboot and image-jump controls
 - EC flash dumping and flashing
+- structured decoding of the panic blob (`framework_ec_get_panic_info` returns the raw
+  `struct panic_data` plus header/trailer fields; upstream's `chromium_ec::panic` keeps its
+  per-architecture decode structs private, so only `print_panic_info` exists there)
 
 ### Expansion Card and Peripheral Support
 
@@ -170,15 +187,73 @@ Compared with the full `framework-system` repo and CLI, the major missing areas 
 ## Highest-Value Next Features
 
 For a .NET application focused on fan curves, system telemetry, and machine status,
-the highest-value additions are likely:
+the highest-value remaining additions are likely:
 
-1. charge-limit and charger-related APIs
-2. a generic feature-query API
-3. privacy, intrusion, and other switch/sensor state APIs
-4. keyboard backlight and similar user-facing device controls
-5. a raw host-command escape hatch if fast parity matters more than a curated ABI
+1. a generic feature-query API (the current surface exposes a compact curated flag set)
+2. a raw host-command escape hatch if fast parity matters more than a curated ABI
+3. charge rate limit — the remaining charger control not yet covered
+4. a max-fan-RPM reader, so managed fan curves can normalise duty against the real ceiling
+5. structured panic decoding, if EC crash triage moves into the managed app
+
+Charge limits, charge current limit, privacy switches, chassis intrusion, EC switch state,
+keyboard backlight, fingerprint LED write, tablet/input-deck mode, thermal thresholds and
+Smart Battery data are all exposed as of the 2026-08-30 update.
 
 ## Submodule Update History
+
+### 2026-08-30: framework-system 39f0f89 → a338c6a (v0.6.5-19)
+
+38 upstream commits. **No breaking changes** — every change to the `framework_lib`
+surface this crate consumes was additive, and the crate compiled against the new
+submodule with no source edits required.
+
+**Upstream additions that mattered:**
+
+- `CrosEc::get_temp_sensor_name(id)` — EC firmware now reports sensor names, and upstream
+  **deleted** the hardcoded per-platform sensor table that our `thermal::sensor_name()`
+  mirrors (`7c3e552 --thermal: Remove hardcoded names`)
+- `CrosEc::get_thermal_threshold` / `set_thermal_threshold` and `EcThermalConfig`
+  (warn/high/halt plus `temp_fan_off`/`temp_fan_max`)
+- `CrosEc::get_ap_throttle_status()` — soft/hard AP throttle
+- `CrosEc::hello()` / `check_hello()`, `get_protocol_info()`, `get_panic_info()`,
+  `port80_read()`, and the `chromium_ec::panic` module
+- `EcRequestSysinfo` plus `SysinfoFlag` (upstream's `get_sysinfo()` only prints)
+- `power::get_cutoff_status()` — battery ship-mode state
+- `power::print_switches()` and a now-public `EC_MEMMAP_SWITCHES` read path
+- the `smart_battery` module: `SmartBattery::collect_data(ec, unseal_key) -> BatteryData`
+  and `SmartBattery::authenticate_battery(ec, &[u8; 16]) -> bool`
+- MEC/NPC EC flash layout corrections and `ccgx` byte-literal cleanups (no FFI impact)
+
+**FFI impact: 15 new exported functions.** See the Current Scope list below. The existing
+ABI was **not** changed — no struct layouts moved, no enum values were renumbered, and no
+functions were removed or resigned. Everything new is additive, so existing managed callers
+keep working after regenerating bindings.
+
+**Sensor naming decision.** `thermal::sensor_name()` keeps the static per-platform table
+even though upstream dropped its copy: it costs no host commands, so the polled thermal
+snapshot stays cheap. The authoritative firmware name is exposed separately through
+`framework_ec_get_temp_sensor_name`, which also resolves the name onto the stable
+`FrameworkSensorName` enum via `thermal::map_sensor_name`. Managed callers should read
+names once, cache them, and keep polling the snapshot for values.
+
+That entry point sends `EcRequestTempSensorGetInfo` directly rather than calling upstream's
+`CrosEc::get_temp_sensor_name`, because the helper discards the `sensor_type` byte the EC
+returns in the same response. One command, both halves.
+
+**Not mirrored from upstream.** `smart_battery`'s file and console helpers
+(`BatteryData::write_to_file` / `read_from_file`, `dump_data`, `dump_to_file`,
+`display_battery_data`, `analyze_health`, `interactive_authenticate`) stay unexposed by
+design: they are persistence and stdout concerns that belong in the managed layer, and the
+underlying values they format are all reachable through `framework_ec_get_smart_battery_data`.
+Upstream's other new printing helpers (`print_thermal_thresholds`, `print_switches`,
+`print_panic_info`, `get_sysinfo`) are likewise superseded by the structured readbacks.
+
+**Toolchain note.** Upstream's new `smart_battery.rs` trips the `io_other_error` lint on
+current stable clippy. `framework_lib` is a path dependency, so clippy treats it as a local
+package and `cargo clippy -- -D warnings` fails on upstream's lint debt. CI now runs
+`cargo clippy --no-deps --all-targets -- -D warnings` to keep the gate on this crate.
+
+Build, fmt, clippy, and the 13 unit tests all pass after the update.
 
 ### 2026-06-23: framework-system 993cb6b → 39f0f89 (v0.6.4)
 
@@ -231,6 +306,14 @@ The `Laptop 13 Pro (Intel Core Ultra Series 3)` SMBIOS string mapping (→ `Plat
   after its contents have been copied.
 - This applies to nested buffers too, such as battery text fields, flash version
   strings, and raw GPU descriptor blobs.
+- Once a record carries more than a handful of buffers, a dedicated aggregate free is
+  better than making the managed side walk every field. `FrameworkSmartBatteryData` owns
+  ten buffers and is released with `framework_smart_battery_data_free`, which nulls each
+  field as it frees so a double call is harmless. Records with one or two buffers stay on
+  the plain `framework_byte_buffer_free` convention.
+- Per-call cost belongs in the ABI shape, not just the docs. EC-reported temperature sensor
+  names cost one host command each, so they are a separate `framework_ec_get_temp_sensor_name`
+  call rather than eight extra buffers on every polled thermal snapshot.
 
 ### Status and Error Reporting
 
