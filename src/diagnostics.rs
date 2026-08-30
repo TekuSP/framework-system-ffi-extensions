@@ -5,7 +5,10 @@
 //! helpers, so the readback logic lives here and returns plain Rust values that
 //! `lib.rs` maps onto the ABI structs.
 
-use framework_lib::chromium_ec::commands::{EcRequestGetProtocolInfo, EcRequestSysinfo};
+use framework_lib::chromium_ec::commands::{
+    EcRequestGetProtocolInfo, EcRequestPort80Read, EcRequestSysinfo, Port80Subcommand,
+    EC_PORT80_SIZE_MAX,
+};
 use framework_lib::chromium_ec::panic::PANIC_DATA_MAGIC;
 use framework_lib::chromium_ec::{CrosEc, CrosEcDriver, EcError, EcRequestRaw};
 
@@ -136,15 +139,54 @@ pub(crate) struct Port80History {
     pub codes: Vec<u8>,
 }
 
+/// Reads the port 80 POST code history.
+///
+/// This deliberately does not call `CrosEc::port80_read`. That helper requires the EC to answer a
+/// `ReadBuffer` request with exactly `2 * num_entries` bytes and fails with `DeviceError` otherwise,
+/// but the Windows driver reports the number of bytes the IOCTL wrote rather than the EC payload
+/// length, so the response is routinely longer. Upstream already knows the length is unreliable —
+/// see the `TODO: Figure out why that's sometimes bigger` in `chromium_ec::windows` and the
+/// commented-out `debug_assert!` in `CrosEc::read_ec_flash_chunk`, which works around the same
+/// quirk by slicing to the requested size. This mirrors that workaround for port 80, so a longer
+/// response is accepted and only a short one is an error.
 pub(crate) fn port80_read(ec: &CrosEc) -> Result<Port80History, EcError> {
-    let history = ec.port80_read()?;
-    let mut codes = Vec::with_capacity(history.codes.len() * 2);
-    for code in &history.codes {
-        codes.extend_from_slice(&code.to_le_bytes());
+    let info = EcRequestPort80Read {
+        subcmd: Port80Subcommand::GetInfo as u16,
+        offset: 0,
+        num_entries: 0,
     }
+    .send_command(ec)?;
+    let writes = { info.writes };
+    let history_size = { info.history_size };
+
+    let mut codes = Vec::with_capacity(history_size as usize * 2);
+    let mut offset = 0;
+    while offset < history_size {
+        let num_entries = core::cmp::min(EC_PORT80_SIZE_MAX, history_size - offset);
+        let data = EcRequestPort80Read {
+            subcmd: Port80Subcommand::ReadBuffer as u16,
+            offset,
+            num_entries,
+        }
+        .send_command_vec(ec)?;
+
+        // Trailing bytes are driver padding; only a short response means the EC failed to answer.
+        let expected = 2 * num_entries as usize;
+        if data.len() < expected {
+            return Err(EcError::DeviceError(format!(
+                "Expected {} entries, got {} bytes",
+                num_entries,
+                data.len()
+            )));
+        }
+
+        codes.extend_from_slice(&data[..expected]);
+        offset += num_entries;
+    }
+
     Ok(Port80History {
-        writes: history.writes,
-        history_size: history.history_size,
+        writes,
+        history_size,
         codes,
     })
 }
