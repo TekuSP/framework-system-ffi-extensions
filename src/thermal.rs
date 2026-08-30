@@ -498,6 +498,22 @@ pub(crate) fn get_cutoff_status(ec: &CrosEc) -> Option<bool> {
     power::get_cutoff_status(ec)
 }
 
+/// Fan count as reported by the EC.
+///
+/// More authoritative than the memmap-derived count in `thermal_snapshot`, which
+/// infers presence from the `0xFFFF` "not present" sentinel.
+pub(crate) fn get_fan_count(ec: &CrosEc) -> Result<usize, framework_lib::chromium_ec::EcError> {
+    power::get_fan_num(ec)
+}
+
+/// Whether the system runs without a battery (Framework Desktop standalone mode).
+///
+/// `is_standalone` reflects the EC's own view; `standalone_mode` additionally
+/// accounts for the platform default.
+pub(crate) fn standalone_state(ec: &CrosEc) -> (bool, bool) {
+    (power::is_standalone(ec), power::standalone_mode(ec))
+}
+
 /// Reads a temperature sensor's name straight from EC firmware.
 pub(crate) struct TempSensorInfo {
     pub name: String,

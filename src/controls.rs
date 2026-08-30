@@ -1,6 +1,7 @@
 use framework_lib::chromium_ec::commands::{
-    DeckStateMode, EcRequestGetUptimeInfo, EcRequestReadBoardId, EcRequestSetTabletMode,
-    MotionSenseChip, MotionSenseInfo, MotionSenseLocation, MotionSenseType,
+    DeckStateMode, EcRequestGetGpuSerial, EcRequestGetUptimeInfo, EcRequestGpioGetV1Count,
+    EcRequestGpioGetV1Info, EcRequestReadBoardId, EcRequestSetTabletMode, GpioGetSubCommand,
+    MotionSenseChip, MotionSenseInfo, MotionSenseLocation, MotionSenseType, RgbS,
 };
 use framework_lib::chromium_ec::{CrosEc, CrosEcDriver, EcError, EcRequestRaw};
 
@@ -129,6 +130,130 @@ fn sensor_location(l: &MotionSenseLocation) -> FrameworkSensorLocation {
         MotionSenseLocation::Lid => FrameworkSensorLocation::Lid,
         MotionSenseLocation::Camera => FrameworkSensorLocation::Camera,
     }
+}
+
+/// Reads a raw ADC channel value.
+pub(crate) fn adc_read(ec: &CrosEc, channel: u8) -> Result<i32, EcError> {
+    ec.adc_read(channel)
+}
+
+/// Probes whether the EC implements a given host command at a given version.
+///
+/// Worth calling before any of the newer commands: support varies by platform and
+/// EC firmware revision, and this distinguishes "not implemented" from "failed".
+pub(crate) fn command_version_supported(
+    ec: &CrosEc,
+    command: u32,
+    version: u8,
+) -> Result<bool, EcError> {
+    ec.cmd_version_supported(command, version)
+}
+
+pub(crate) fn get_hibernate_delay(ec: &CrosEc) -> Result<u32, EcError> {
+    ec.get_ec_hib_delay()
+}
+
+pub(crate) fn set_hibernate_delay(ec: &CrosEc, seconds: u32) -> Result<(), EcError> {
+    ec.set_ec_hib_delay(seconds)
+}
+
+/// Sets the charge rate limit.
+///
+/// `rate` is in amps and `battery_soc` an optional state-of-charge threshold in
+/// percent above which the limit applies.
+pub(crate) fn set_charge_rate_limit(
+    ec: &CrosEc,
+    rate: f32,
+    battery_soc: Option<f32>,
+) -> Result<(), EcError> {
+    ec.set_charge_rate_limit(rate, battery_soc)
+}
+
+/// Sets the fingerprint LED brightness as a percentage, the finer-grained
+/// counterpart to the discrete level control.
+pub(crate) fn set_fp_led_percentage(ec: &CrosEc, percentage: u8) -> Result<(), EcError> {
+    ec.set_fp_led_percentage(percentage)
+}
+
+pub(crate) fn ps2_emulation_enable(ec: &CrosEc, enable: bool) -> Result<(), EcError> {
+    ec.ps2_emulation_enable(enable)
+}
+
+pub(crate) fn remap_key(ec: &CrosEc, row: u8, col: u8, scanset: u16) -> Result<(), EcError> {
+    ec.remap_key(row, col, scanset)
+}
+
+pub(crate) fn remap_caps_to_ctrl(ec: &CrosEc) -> Result<(), EcError> {
+    ec.remap_caps_to_ctrl()
+}
+
+pub(crate) fn set_rgb_keyboard_colors(
+    ec: &CrosEc,
+    start_key: u8,
+    colors: Vec<RgbS>,
+) -> Result<(), EcError> {
+    ec.rgbkbd_set_color(start_key, colors)
+}
+
+pub(crate) fn get_gpio(ec: &CrosEc, name: &str) -> Result<bool, EcError> {
+    ec.get_gpio(name)
+}
+
+pub(crate) fn set_gpio(ec: &CrosEc, name: &str, value: bool) -> Result<(), EcError> {
+    ec.set_gpio(name, value)
+}
+
+pub(crate) struct GpioInfo {
+    pub name: String,
+    pub value: bool,
+    pub flags: u32,
+}
+
+/// Number of GPIOs the EC exposes.
+///
+/// Upstream's `get_all_gpios` prints each entry and returns only the count, so
+/// drive the Count/Info subcommands directly to get names and values back.
+pub(crate) fn gpio_count(ec: &CrosEc) -> Result<u8, EcError> {
+    Ok(EcRequestGpioGetV1Count {
+        subcmd: GpioGetSubCommand::Count as u8,
+    }
+    .send_command(ec)?
+    .val)
+}
+
+/// Reads one GPIO's name, level and flags by index.
+pub(crate) fn gpio_info_at(ec: &CrosEc, index: u8) -> Result<GpioInfo, EcError> {
+    let info = EcRequestGpioGetV1Info {
+        subcmd: GpioGetSubCommand::Info as u8,
+        index,
+    }
+    .send_command(ec)?;
+    let name_bytes = { info.name };
+    let name = std::str::from_utf8(&name_bytes)
+        .unwrap_or_default()
+        .trim_end_matches(char::from(0))
+        .to_string();
+    Ok(GpioInfo {
+        name,
+        value: { info.val } == 1,
+        flags: { info.flags },
+    })
+}
+
+/// Reads the expansion-bay GPU serial.
+///
+/// Sends the command directly rather than calling `CrosEc::get_gpu_serial`, whose
+/// `String::from_utf8(..).unwrap()` would abort the host process on a garbled
+/// serial. Invalid UTF-8 is reported as an error instead.
+pub(crate) fn get_gpu_serial(ec: &CrosEc) -> Result<String, EcError> {
+    let response = EcRequestGetGpuSerial { idx: 0 }.send_command(ec)?;
+    if { response.valid } == 0 {
+        return Err(EcError::DeviceError("No valid GPU serial".to_string()));
+    }
+    let serial = { response.serial };
+    std::str::from_utf8(&serial)
+        .map(|s| s.trim_end_matches(char::from(0)).trim().to_string())
+        .map_err(|err| EcError::DeviceError(format!("GPU serial is not valid UTF-8: {:?}", err)))
 }
 
 fn sensor_chip(c: &MotionSenseChip) -> FrameworkSensorChip {

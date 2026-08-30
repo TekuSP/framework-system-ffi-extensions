@@ -119,6 +119,27 @@ control layer:
 - full Smart Battery (SBS) data set, including chemistry, manufacture date, cycle count,
   per-cell voltages, safety/PF status words and the lifetime blocks when unsealed
 - Smart Battery SHA-1 HMAC authentication challenge
+- PD controller firmware versions (bootloader, backup and main images per controller)
+- PD charger info per port (role, charging type, voltage/current limits, max power)
+- charging and AC-present state
+- retimer firmware version
+- EC-reported fan count
+- standalone (batteryless Desktop) mode state
+- charge rate limit write
+- EC hibernate delay read and write
+- fingerprint LED percentage write
+- raw ADC channel read
+- host command version probing
+- stylus battery level
+- touchscreen enable/disable
+- touchpad haptic intensity and click force (write-only)
+- per-key RGB keyboard colors
+- key remapping and Caps-to-Ctrl
+- PS/2 emulation toggle
+- GPIO read, write, and enumeration by index
+- expansion-bay GPU serial read (the write path is deliberately not exposed)
+- firmware versions for cameras, Framework 16 input modules, USB hubs and the audio card
+- NVMe model and firmware version (Linux only)
 
 The current FFI still does **not** expose a max-fan-RPM reader. The `fan_off` / `fan_max`
 values now readable through `framework_ec_get_thermal_thresholds` are the *temperature*
@@ -132,31 +153,33 @@ Compared with the full `framework-system` repo and CLI, the major missing areas 
 
 ### Charger and Battery Controls
 
-- charge rate limit
-- other charger-oriented control surfaces
+Nothing outstanding. Charge limits, charge current limit, charge rate limit, cutoff
+status, charging/AC state and the full Smart Battery data set are all exposed.
 
 ### Sensors and Switch State
 
-- stylus battery reporting
-
-Ambient light readings, accelerometer/lid angle, EC uptime, S0ix counters, board ID,
-EC switch positions and AP throttle status are all exposed now.
+Nothing outstanding. Ambient light, accelerometer/lid angle, EC uptime, S0ix counters,
+board ID, EC switch positions, AP throttle status, raw ADC channels and stylus battery
+are all exposed.
 
 ### USB-C and PD Management
 
-- PD controller information
 - PD reset/disable/enable operations
 - Chromebook-style PD info surfaces
+- PD bus locking (`lock_pd_bus`) — deliberately unexposed, see below
+
+PD controller firmware versions, per-port charger info and retimer versions are exposed now.
 - USB-C expansion card VID/PID confirmation: SD (`0x05E3:0x0749`) and MicroSD (`0x05E3:0x0751`) PIDs are Genesys Logic reader candidates; confidence is DerivedWeak pending hardware testing against actual Framework cards
 - USB-C passive cards (USB-C expansion card, DP 2nd Gen passthrough, HDMI 3rd Gen Parade PS186) have no USB presence; they remain Unknown/DerivedWeak with no slot disambiguation path currently
 
 ### Device and Platform Controls
 
-- broader keyboard backlight control surface
-- touchscreen enable/disable
-- NVIDIA-related status on supported systems
+- NVIDIA-related status on supported systems (upstream gates this behind its optional
+  `nvidia` feature and `nvml-wrapper`, which this crate does not enable)
 
-Fingerprint LED write, tablet mode override and input deck mode control are exposed now.
+Fingerprint LED level and percentage, tablet mode override, input deck mode, touchscreen
+enable/disable, touchpad haptics and click force, per-key RGB, key remapping, PS/2
+emulation, GPIO access and hibernate delay are all exposed now.
 
 ### Firmware and Binary Tooling
 
@@ -173,16 +196,23 @@ Fingerprint LED write, tablet mode override and input deck mode control are expo
 
 ### Expansion Card and Peripheral Support
 
-- richer DisplayPort and HDMI expansion card details and update flows
-- richer audio card info
-- retimer and other peripheral-oriented surfaces
+- DisplayPort and HDMI expansion card update flows
+- audio card detail beyond the firmware version
+
+Camera, input module, USB hub and audio card firmware versions, retimer version and
+NVMe model/firmware are exposed now. Note the NVMe path is **Linux only**: upstream gates
+`framework_lib::nvme` behind `#[cfg(target_os = "linux")]` because it issues an NVMe admin
+passthrough ioctl, so other platforms get `FrameworkStatusCode::NotSupported`.
 
 ### Raw and Advanced Escape Hatches
 
 - generic host command bridge
-- GPIO access
 - more direct feature-query surfaces
+- EC console read (`console_read_one` returns a `String` and would be cheap to add)
+- full memmap dump (`dump_mem_region`)
 - self-test style operations
+
+GPIO read, write and enumeration are exposed now, as is host command version probing.
 
 ## Highest-Value Next Features
 
@@ -191,13 +221,33 @@ the highest-value remaining additions are likely:
 
 1. a generic feature-query API (the current surface exposes a compact curated flag set)
 2. a raw host-command escape hatch if fast parity matters more than a curated ABI
-3. charge rate limit — the remaining charger control not yet covered
-4. a max-fan-RPM reader, so managed fan curves can normalise duty against the real ceiling
+3. a max-fan-RPM reader, so managed fan curves can normalise duty against the real ceiling
+4. ESRT, for firmware inventory and update status
 5. structured panic decoding, if EC crash triage moves into the managed app
+6. EC console read and memmap dump, both cheap, for diagnostics
 
-Charge limits, charge current limit, privacy switches, chassis intrusion, EC switch state,
-keyboard backlight, fingerprint LED write, tablet/input-deck mode, thermal thresholds and
-Smart Battery data are all exposed as of the 2026-08-30 update.
+## Deliberately Not Exposed
+
+These upstream capabilities are reachable but intentionally left out of the ABI. Exposing
+them through a .NET interop layer puts destructive firmware operations one P/Invoke away
+from any managed caller, with no confirmation path and no way to recover a bricked EC.
+
+- **EC flash**: `reflash`, `read_ec_flash`, `get_entire_ec_flash`, `protect_ec_flash`,
+  `test_ec_flash_read`, `flash_notify`
+- **EC reboot and image jump**: `reboot`, `reboot_ec`, `jump_ro`, `jump_rw`,
+  `disable_jump`, `cancel_jump`
+- **GPU descriptor and serial writing**: `set_gpu_descriptor`, `write_ec_gpu_chunk`,
+  `set_gpu_serial`. The descriptor *read* and *validate* paths are exposed, as is
+  `framework_ec_get_gpu_serial` — only the write paths are withheld. Programming a serial
+  changes persistent expansion-bay identity, and upstream's `set_gpu_serial` copies into a
+  fixed slice without checking the length.
+- **Retimer firmware update mode**: `retimer_enable_fwupd`, `retimer_enable_compliance`
+- **PD bus locking**: `lock_pd_bus`
+
+Also left out, for a different reason: the `ec_binary`, `capsule` and `ccgx::binary`
+parsers operate on file bytes rather than hardware, so they are pure functions the managed
+side can implement directly without crossing the FFI boundary. The `smart_battery` file and
+console helpers are skipped on the same grounds.
 
 ## Submodule Update History
 
@@ -321,6 +371,34 @@ The `Laptop 13 Pro (Intel Core Ultra Series 3)` SMBIOS string mapping (→ `Plat
   low-level interop layer without handwritten glue.
 - Device error messages are better exposed indirectly through a token plus retrieval API
   than discarded into a generic error code.
+
+### Panic Safety Across the Boundary
+
+- **A panic in Rust aborts the managed host.** Several upstream helpers `unwrap()` on
+  device errors or index fixed slices without checking, which is fine for a CLI that
+  crashes with a message and unacceptable for a library loaded into a long-running app.
+  Wrap or re-implement rather than calling them directly.
+- Cases found so far: `CrosEc::get_gpu_serial` (`String::from_utf8(..).unwrap()`),
+  `audio_card::check_synaptics_fw_version` (`unwrap()` on device open plus an
+  `assert_eq!` on the HID reply), and the `camera` / `usbhub` / `inputmodule` version
+  helpers (`rusb::devices().unwrap()`). `CrosEc::set_gpu_serial` has the same problem
+  (`copy_from_slice` on a serial that must be exactly 18 bytes), but it is not exposed at
+  all — see Deliberately Not Exposed.
+- Unbounded waits are the same class of problem. Upstream's audio card version loop spins
+  until the card replies; `versions::audio_card_version` bounds it instead so a wedged
+  card cannot hang the calling thread.
+- When re-implementing, keep upstream's protocol semantics exactly and change only the
+  error handling — the point is to return a `FrameworkStatus`, not to behave differently.
+
+### Platform Availability
+
+- Some upstream modules are `cfg`-gated and simply do not exist on every target that CI
+  builds. `framework_lib::nvme` is `#[cfg(target_os = "linux")]`, so `framework_get_nvme_version`
+  compiles to a stub elsewhere.
+- `FrameworkStatusCode::NotSupported` exists to distinguish "this build cannot do that on
+  this platform" from `DataUnavailable`, which means the capability is present but did not
+  answer. Managed callers should treat the former as a permanent capability gap and the
+  latter as a transient read failure.
 
 ### Upstream Compatibility
 
