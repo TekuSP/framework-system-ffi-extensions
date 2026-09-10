@@ -50,7 +50,7 @@ jobs:
           submodules: recursive
 
       - name: Setup Rust with Cache
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache-workspaces: |
             framework-system -> target
@@ -88,7 +88,7 @@ jobs:
           submodules: recursive
 
       - name: Setup Rust with Cache
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache-workspaces: |
             framework-system -> target
